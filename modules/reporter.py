@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
 import datetime as _dt
+import json
 
 from .utils import (
     IssueSeverity,
@@ -22,6 +23,8 @@ class ReportPaths:
 
     json_path: Path
     txt_path: Path
+    # ret files may be many (one per sub-lote); include the directory where they're stored
+    ret_dir: Optional[Path] = None
 
 
 class Reporter:
@@ -38,11 +41,17 @@ class Reporter:
         # create a subdirectory per lote/arquivo stem for better organization
         stem = summary.metadata.working_path.stem
         target_dir = reports_dir / stem
-        target_dir.mkdir(parents=True, exist_ok=True)
+        json_dir = target_dir / "json"
+        txt_dir = target_dir / "txt"
+        ret_dir = target_dir / "ret"
+        json_dir.mkdir(parents=True, exist_ok=True)
+        txt_dir.mkdir(parents=True, exist_ok=True)
+        ret_dir.mkdir(parents=True, exist_ok=True)
+
         timestamp = _dt.datetime.now().strftime("%Y%m%d%H%M%S")
 
-        json_path = target_dir / f"{stem}.{timestamp}.json"
-        txt_path = target_dir / f"{stem}.{timestamp}.txt"
+        json_path = json_dir / f"{stem}.{timestamp}.json"
+        txt_path = txt_dir / f"{stem}.{timestamp}.txt"
 
         json_payload = self._build_json(summary)
         text_payload = self._build_text(summary)
@@ -50,29 +59,67 @@ class Reporter:
         write_json(json_path, json_payload)
         write_text(txt_path, text_payload)
 
-        # If the validation produced a generated RET (MAC x CON), write it to disk
+        # If the validation produced a generated RET (MAC x CON), write it to disk under ret/
         generated = override_ret_lines if override_ret_lines is not None else getattr(summary.metadata, "generated_ret_lines", None)
         if generated:
-            # write as .FHMLRET11.d file under the same target dir
             if sublot_index is None:
                 ret_name = f"{stem}.{timestamp}.FHMLRET11.d"
             else:
                 ret_name = f"{stem}.{timestamp}.FHMLRET11_{sublot_index:03}.d"
-            ret_path = target_dir / ret_name
+            ret_path = ret_dir / ret_name
             # join lines with newline and persist
             write_text(ret_path, "\n".join(generated) + "\n")
-            # augment the json payload on disk with ret metadata (rewrite)
             # compute simple stats: counts of occurrences 16 and 17
             count_16 = sum(1 for line in generated if line[111:113] == "16")
             count_17 = sum(1 for line in generated if line[111:113] == "17")
             json_payload.setdefault("ret11", {})
-            json_payload["ret11"]["path"] = str(ret_path)
+            # store relative path to the ret dir for portability
+            json_payload["ret11"]["path"] = str(Path("ret") / ret_name)
             json_payload["ret11"]["count_16"] = count_16
             json_payload["ret11"]["count_17"] = count_17
             json_payload["ret11"]["detail_count"] = len([l for l in generated if l.startswith("2")])
             write_json(json_path, json_payload)
 
-        return ReportPaths(json_path=json_path, txt_path=txt_path)
+        # Build or update summary.json at target_dir/summary.json which aggregates per-stem results
+        summary_path = target_dir / "summary.json"
+        # gather current ret files and json statuses
+        ret_files = [p.name for p in sorted(ret_dir.iterdir()) if p.is_file()]
+        json_files = [p for p in sorted(json_dir.iterdir()) if p.is_file()]
+
+        # compute overall status by inspecting all JSON reports under json/
+        overall_status = "OK"
+        for jf in json_files:
+            try:
+                with (json_dir / jf).open("r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+                val = payload.get("validacao", {})
+                # check each of the three statuses
+                for key in ("estrutura", "encoding", "conteudo"):
+                    status_val = val.get(key)
+                    if status_val == "ERROR":
+                        overall_status = "ERROR"
+                        break
+                    if status_val == "WARN" and overall_status != "ERROR":
+                        overall_status = "WARN"
+                if overall_status == "ERROR":
+                    break
+            except Exception:
+                # if we cannot read a json file, mark as WARN but continue
+                if overall_status != "ERROR":
+                    overall_status = "WARN"
+
+        summary_payload = {
+            "arquivo": stem,
+            "total_sub_lotes": len(ret_files),
+            "generated_rets": [str(Path("ret") / name) for name in ret_files],
+            "status_geral": overall_status,
+            "json_reports": [str(Path("json") / p.name) for p in sorted(json_dir.iterdir()) if p.is_file()],
+            "txt_reports": [str(Path("txt") / p.name) for p in sorted(txt_dir.iterdir()) if p.is_file()],
+        }
+
+        write_json(summary_path, summary_payload)
+
+        return ReportPaths(json_path=json_path, txt_path=txt_path, ret_dir=ret_dir)
 
     def _build_json(self, summary: ValidationSummary) -> Dict[str, object]:
         return {
