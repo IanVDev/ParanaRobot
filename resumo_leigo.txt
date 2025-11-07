@@ -1,4 +1,4 @@
 🟢 Revalidação final executada com sucesso.
-Linhas removidas: [3]
-Arquivo final: HMLMAC12.TESTE001.20251107135200.FHMLRET11_fixed_001_final.d
+Linhas removidas: [3, 6]
+Arquivo final: HMLMAC12.B254.D0000001.20251107115628.FHMLRET11_final.d
 Verifique summary_final.json na pasta correspondente para status final.

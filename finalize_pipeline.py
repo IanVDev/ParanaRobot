@@ -105,7 +105,14 @@ def finalize_and_revalidate(json_path):
         except Exception:
             pass
         try:
+            if not p.exists():
+                # already moved or missing, skip silently
+                continue
             target = archive_dir / p.name
+            # avoid overwriting an existing archive entry: if exists, add timestamp
+            if target.exists():
+                ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+                target = archive_dir / f"{p.stem}_{ts}{p.suffix}"
             print(f"📦 Arquivo antigo detectado e movendo para archive: {p.name} -> {target}")
             shutil.move(str(p), str(target))
         except Exception as exc:
@@ -177,7 +184,12 @@ def finalize_and_revalidate(json_path):
         except Exception:
             pass
         try:
+            if not p.exists():
+                continue
             target = archive_dir / p.name
+            if target.exists():
+                ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+                target = archive_dir / f"{p.stem}_{ts}{p.suffix}"
             print(f"📦 Movendo final redundante para archive: {p.name} -> {target}")
             shutil.move(str(p), str(target))
         except Exception as exc:
@@ -210,10 +222,39 @@ def finalize_and_revalidate(json_path):
         try:
             with found_json.open("r", encoding="utf-8") as fh:
                 pj = json.load(fh)
-            summary_payload["status"] = pj.get("validacao", {}).get("conteudo")
+            # Determine status intelligently from validation errors/warnings lists
+            valid = pj.get("validacao", {})
+            errs = valid.get("erros") or []
+            avisos = valid.get("avisos") or []
+            try:
+                errs_len = len(errs)
+            except Exception:
+                errs_len = 0
+            try:
+                avisos_len = len(avisos)
+            except Exception:
+                avisos_len = 0
+
+            if errs_len > 0:
+                summary_payload["status"] = "ERROR"
+            elif avisos_len > 0:
+                summary_payload["status"] = "WARN"
+            else:
+                summary_payload["status"] = "OK"
+
             summary_payload["report_json"] = str(found_json)
         except Exception:
-            pass
+            # fallback: preserve previous behavior if JSON is malformed
+            try:
+                raw = pj.get("validacao", {}).get("conteudo")
+                if raw and "OK" in str(raw).upper():
+                    summary_payload["status"] = "OK"
+                elif raw and ("WARN" in str(raw).upper() or "AVISO" in str(raw).upper()):
+                    summary_payload["status"] = "WARN"
+                else:
+                    summary_payload["status"] = "ERROR"
+            except Exception:
+                summary_payload["status"] = "ERROR"
 
     summary_path = corrigido_dir / "summary_final.json"
     with summary_path.open("w", encoding="utf-8") as fh:
@@ -241,6 +282,36 @@ def finalize_and_revalidate(json_path):
         if resumo.exists():
             shutil.copy2(resumo, target / resumo.name)
         print(f"📁 Arquivos finais copiados para {target}")
+        # Deduplicate in target: keep canonical _final.d (not _final_final) or newest
+        try:
+            candidates = list(target.glob(f"{canonical_stem}*.d"))
+            # prefer one that ends with exactly '_final.d' and not '_final_final'
+            canon = None
+            for c in candidates:
+                if c.name.endswith("_final.d") and "_final_final" not in c.name:
+                    canon = c
+                    break
+            if not canon and candidates:
+                # fallback: choose newest by mtime
+                canon = max(candidates, key=lambda p: p.stat().st_mtime)
+
+            for c in candidates:
+                try:
+                    if canon and c.resolve() == canon.resolve():
+                        continue
+                except Exception:
+                    pass
+                # move non-canonical to reports archive to avoid cluttering send folder
+                quarant_dir = archive_dir / "from_ready"
+                quarant_dir.mkdir(parents=True, exist_ok=True)
+                dest = quarant_dir / c.name
+                if dest.exists():
+                    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+                    dest = quarant_dir / f"{c.stem}_{ts}{c.suffix}"
+                print(f"🗄️ Movendo variante não-canonical do ready para archive: {c.name} -> {dest}")
+                shutil.move(str(c), str(dest))
+        except Exception as exc:
+            print(f"Falha ao deduplicar em {target}: {exc}")
     except Exception as exc:
         print(f"Falha ao mover arquivos finais para {target}: {exc}")
 
