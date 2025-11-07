@@ -1,15 +1,8 @@
 #!/usr/bin/env python3
-"""Simple fix pipeline for ParanaRobot reports.
+"""Diagnosis pipeline (renamed from fix_pipeline.py).
 
-Usage:
-    python3 fix_pipeline.py reports/<lote>/json/<file>.json
-
-This script reads the ParanaRobot JSON, extracts errors/warnings, builds a
-human-readable diagnostic, attempts an automatic correction of the RET file
-under reports/<lote>/ret/, writes the corrected file to reports/<lote>/corrigido/
-and emits logs: fix_pipeline.log and resumo_leigo.txt.
-
-It also attempts to re-run paranarobot (`main.py`) on the corrected file.
+Reads ParanaRobot JSON reports, produces diagnostics and (optionally) generates
+corrected RET files per sub-lote.
 """
 from __future__ import annotations
 
@@ -28,7 +21,7 @@ def load_json(path: Path) -> dict:
         return json.load(f)
 
 
-def diagnose_and_fix(json_path: Path) -> Path:
+def diagnose_and_fix(json_path: Path) -> List[Path]:
     base = json_path.parent.parent
     data = load_json(json_path)
 
@@ -123,16 +116,18 @@ def diagnose_and_fix(json_path: Path) -> Path:
         fixed_lines.extend([ln[:240].ljust(240) for ln in details])
         fixed_lines.append(new_trailer[:240].ljust(240))
 
-        batch_name = f"{ret_file.stem}_fix_{idx:03}.d"
+        batch_name = f"{ret_file.stem}_fixed_{idx:03}.d"
         batch_path = fixed_dir / batch_name
         with batch_path.open("w", encoding="utf-8") as fh:
             for l in fixed_lines:
                 fh.write(l + "\n")
         generated_fixed.append(batch_path)
 
-    # Save logs
-    Path("fix_pipeline.log").write_text("\n".join(report_lines), encoding="utf-8")
-    Path("resumo_leigo.txt").write_text("\n".join(resumo_leigo), encoding="utf-8")
+    # Persist logs
+    with Path("fix_pipeline.log").open("w", encoding="utf-8") as fh:
+        fh.write("\n".join(report_lines))
+    with Path("resumo_leigo.txt").open("w", encoding="utf-8") as fh:
+        fh.write("\n".join(resumo_leigo))
 
     print(f"✅ {len(generated_fixed)} arquivos corrigidos gerados em {fixed_dir}")
     return generated_fixed
@@ -143,7 +138,7 @@ def main(argv: List[str] | None = None) -> int:
 
     argv = argv if argv is not None else sys.argv[1:]
     if not argv or len(argv) != 1:
-        print("Uso: python3 fix_pipeline.py <path_para_json>")
+        print("Uso: python3 diagnose_pipeline.py <path_para_json>")
         return 2
 
     json_path = Path(argv[0])
@@ -153,57 +148,14 @@ def main(argv: List[str] | None = None) -> int:
 
     fixed = diagnose_and_fix(json_path)
 
-    # Re-run paranarobot on the fixed file(s) to update reports/summary
-    fixed_dir = Path(json_path).parent.parent / "corrigido"
-    summary_entries = []
-    for f in (fixed if isinstance(fixed, list) else [fixed]):
+    # Re-run paranarobot on the fixed file(s)
+    for f in fixed:
         try:
             print(f"🔁 Reexecutando paranarobot (main.py) sobre {f} ...")
             subprocess.run(["python3", "main.py", str(f)], check=False)
         except Exception as exc:
             print(f"Falha ao reexecutar main.py sobre {f}: {exc}")
 
-        # try to find the generated JSON that references this file in its 'origem'
-        status = "UNKNOWN"
-        found_json = None
-        for jf in Path("reports").rglob("*.json"):
-            try:
-                with jf.open("r", encoding="utf-8") as handle:
-                    payload = json.load(handle)
-                origem_val = payload.get("origem")
-                if origem_val == str(f) or origem_val == str(Path(f).resolve()):
-                    found_json = jf
-                    status = payload.get("validacao", {}).get("conteudo", "UNKNOWN")
-                    break
-            except Exception:
-                continue
-
-        entry = {
-            "fixed_file": str(f),
-            "status": status,
-            "report_json": str(found_json) if found_json else None,
-        }
-        summary_entries.append(entry)
-
-    # write a summary_multilot.json in the corrigido directory
-    summary_path = fixed_dir / "summary_multilot.json"
-    overall = "OK"
-    for e in summary_entries:
-        if e["status"] == "ERROR":
-            overall = "ERROR"
-            break
-        if e["status"] == "WARN" and overall != "ERROR":
-            overall = "WARN"
-
-    summary_payload = {
-        "arquivo": Path(json_path).parent.parent.name,
-        "generated": summary_entries,
-        "status_geral": overall,
-    }
-    with summary_path.open("w", encoding="utf-8") as fh:
-        json.dump(summary_payload, fh, indent=2, ensure_ascii=False)
-
-    print(f"✅ summary_multilot escrito em {summary_path}")
     return 0
 
 

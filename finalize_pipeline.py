@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
-import json, subprocess
+"""Finalize pipeline (renamed from fix_pipeline_final.py).
+
+Removes inconsistent lines, recalculates trailer totals, produces a FINAL RET and
+places final artifacts in `input/arquivo_pronto_para_envio_connect`.
+"""
+import json
+import subprocess
 from pathlib import Path
 from datetime import datetime
+
 
 def load_json(path):
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
-def remove_inconsistent_and_revalidate(json_path):
+
+def finalize_and_revalidate(json_path):
     data = load_json(json_path)
     base = Path(json_path).parent.parent
     corrigido_dir = base / "corrigido"
@@ -15,10 +23,9 @@ def remove_inconsistent_and_revalidate(json_path):
     # Localiza arquivo corrigido .d correspondente
     candidates = []
     if corrigido_dir.exists():
-        candidates = list(corrigido_dir.glob("*_fix_*.d")) or list(corrigido_dir.glob("*_fix.d"))
+        candidates = list(corrigido_dir.glob("*_fixed_*.d")) or list(corrigido_dir.glob("*_fixed.d"))
 
     if not candidates:
-        # try to use 'origem' field inside the JSON which often points to the corrected file
         origem = data.get("origem") or (data.get("validacao", {}) and data.get("origem"))
         if origem:
             p = Path(origem)
@@ -26,7 +33,6 @@ def remove_inconsistent_and_revalidate(json_path):
                 input_file = p
                 corrigido_dir = p.parent
             else:
-                # try resolve
                 pr = Path(origem).resolve()
                 if pr.exists():
                     input_file = pr
@@ -39,11 +45,11 @@ def remove_inconsistent_and_revalidate(json_path):
             return
     else:
         input_file = candidates[-1]
+
     output_file = corrigido_dir / (input_file.stem + "_final.d")
 
     # Identifica linhas inconsistentes a remover
     inconsistent_lines = []
-    # Try to read warnings from the same structure as earlier (validacao.avisos)
     valid = data.get("validacao") or data
     warnings = valid.get("avisos") or valid.get("warnings") or []
     for w in warnings:
@@ -65,18 +71,15 @@ def remove_inconsistent_and_revalidate(json_path):
             continue
         new_lines.append(line[:240].ljust(240))
 
-    # Recalcular trailer
+    # Recalcular trailer usando slice 17:32
     header = new_lines[0]
     details = [l for l in new_lines if l.startswith("200")]
     trailer = [l for l in new_lines if l.startswith("300")][-1]
 
     total_registros = str(len(details)).rjust(8, "0")
-    # Note: user script used slice 50:62 for values; keep as provided but fallback to 17:32 if empty
-    # Compute total using the same slice used by Analyzer (positions 17:32)
     total_val = 0
     for l in details:
         slice_val = l[17:32].strip()
-        # remove any non-digit chars just in case
         slice_val = ''.join(ch for ch in slice_val if ch.isdigit())
         if not slice_val:
             continue
@@ -155,11 +158,11 @@ def remove_inconsistent_and_revalidate(json_path):
     try:
         import shutil
 
-        # move final file
+        # copy final file
         shutil.copy2(output_file, target / output_file.name)
-        # move summary_final.json
+        # copy summary_final.json
         shutil.copy2(summary_path, target / summary_path.name)
-        # move resumo_leigo.txt
+        # copy resumo_leigo.txt
         if resumo.exists():
             shutil.copy2(resumo, target / resumo.name)
         print(f"📁 Arquivos finais copiados para {target}")
@@ -168,9 +171,13 @@ def remove_inconsistent_and_revalidate(json_path):
 
     print("📄 resumo_leigo.txt atualizado com resultados.")
 
+
 if __name__ == "__main__":
     import sys
-    if len(sys.argv) != 2:
-        print("Uso: python3 fix_pipeline_final.py <path_para_json>")
+    if len(sys.argv) != 1 and len(sys.argv) != 2:
+        print("Uso: python3 finalize_pipeline.py <optional_path_para_json>")
         sys.exit(1)
-    remove_inconsistent_and_revalidate(sys.argv[1])
+    if len(sys.argv) == 2:
+        finalize_and_revalidate(sys.argv[1])
+    else:
+        print("Passe o caminho do JSON de revalidação do sub-lote para finalizar.")
