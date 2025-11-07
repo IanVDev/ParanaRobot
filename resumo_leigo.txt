@@ -1,0 +1,5 @@
+🟢 RESUMO LEIGO - ANÁLISE DO LOTE
+⚠️ Foram encontrados 39 erros:
+- Estruturais (ordem de registros, headers/trailers) se mencionados.
+- Soma de trailer incorreta ou registros fora da ordem.
+💡 O ParanaRobot irá gerar um arquivo corrigido automaticamente.
