@@ -172,6 +172,12 @@ def process_pair(mac_zip: Path, con_zip: Path, cfg: ManagerConfig, logger: loggi
     # Run MAC x CON comparison
     maccon_result = maccon_validator.validate_pair(mac_s.lines, con_s.lines)
 
+    # attach generated RET lines to metadata so reporter will persist them
+    try:
+        mac_meta.generated_ret_lines = maccon_result.ret_lines  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
     # Build summary (minimal) and render reports
     summary = ValidationSummary(
         metadata=mac_meta,
@@ -190,6 +196,7 @@ def process_pair(mac_zip: Path, con_zip: Path, cfg: ManagerConfig, logger: loggi
     except Exception as exc:
         logger.exception("Failed to render reports for %s: %s", mac_zip, exc)
         return False
+    
 
     return True
 

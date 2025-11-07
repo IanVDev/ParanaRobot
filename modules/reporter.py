@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 import datetime as _dt
 
 from .utils import (
@@ -27,13 +27,20 @@ class ReportPaths:
 class Reporter:
     """Materialize validation results into human-readable reports."""
 
-    def render(self, summary: ValidationSummary, base_dir: Path) -> ReportPaths:
+    def render(
+        self,
+        summary: ValidationSummary,
+        base_dir: Path,
+        sublot_index: Optional[int] = None,
+        override_ret_lines: Optional[List[str]] = None,
+    ) -> ReportPaths:
         reports_dir = ensure_reports_dir(base_dir)
         # create a subdirectory per lote/arquivo stem for better organization
         stem = summary.metadata.working_path.stem
         target_dir = reports_dir / stem
         target_dir.mkdir(parents=True, exist_ok=True)
         timestamp = _dt.datetime.now().strftime("%Y%m%d%H%M%S")
+
         json_path = target_dir / f"{stem}.{timestamp}.json"
         txt_path = target_dir / f"{stem}.{timestamp}.txt"
 
@@ -44,10 +51,13 @@ class Reporter:
         write_text(txt_path, text_payload)
 
         # If the validation produced a generated RET (MAC x CON), write it to disk
-        generated = getattr(summary.metadata, "generated_ret_lines", None)
+        generated = override_ret_lines if override_ret_lines is not None else getattr(summary.metadata, "generated_ret_lines", None)
         if generated:
             # write as .FHMLRET11.d file under the same target dir
-            ret_name = f"{stem}.{timestamp}.FHMLRET11.d"
+            if sublot_index is None:
+                ret_name = f"{stem}.{timestamp}.FHMLRET11.d"
+            else:
+                ret_name = f"{stem}.{timestamp}.FHMLRET11_{sublot_index:03}.d"
             ret_path = target_dir / ret_name
             # join lines with newline and persist
             write_text(ret_path, "\n".join(generated) + "\n")
