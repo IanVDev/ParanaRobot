@@ -10,6 +10,7 @@ import shutil
 from modules.analyzer import Analyzer
 from modules.fhml_mac_validator import FHMLMacValidator
 from modules.fhml_mac_validator_full import FHMLMacValidatorFull
+from modules.fhml_mac_con_validator import FHMLMacConValidator
 from modules.reporter import Reporter
 from modules.sanitizer import Sanitizer
 from modules.unzipper import Unzipper
@@ -71,6 +72,37 @@ def main(argv: Sequence[str] | None = None) -> int:
         mac_full = FHMLMacValidatorFull()
         mac_result = mac_full.validate(sanitize_result.lines)
         analysis_section = mac_result.section
+
+        # attempt to locate a corresponding CON file in the same working directory
+        con_lines = None
+        try:
+            working_dir = metadata.working_path.parent
+            # look for any file containing 'CON' in the name
+            candidate = next((p for p in working_dir.iterdir() if p.is_file() and 'CON' in p.name.upper()), None)
+            if candidate:
+                # Use Unzipper + Sanitizer to robustly prepare the CON file (handles ZIPs too)
+                con_extraction = unzipper.extract(candidate)
+                if con_extraction.error or con_extraction.metadata is None:
+                    logging.getLogger(__name__).warning("Não foi possível extrair CON candidato %s: %s", candidate, con_extraction.error)
+                else:
+                    con_sanitize = sanitizer.sanitize(con_extraction.metadata.working_path)
+                    if con_sanitize.section.status.name == 'ERROR':
+                        logging.getLogger(__name__).warning("Sanitização CON retornou erro: %s", con_sanitize.section.issues)
+                    con_lines = con_sanitize.lines
+        except Exception as exc:
+            logging.getLogger(__name__).exception("Erro ao localizar/ler arquivo CON: %s", exc)
+            con_lines = None
+
+        if con_lines:
+            maccon = FHMLMacConValidator()
+            try:
+                mac_con_result = maccon.validate_pair(sanitize_result.lines, con_lines)
+                # attach content from mac_con_result (prefer these issues)
+                analysis_section = mac_con_result.section
+                # write RET11 generated to reports dir later via reporter (we'll attach to metadata as extra)
+                metadata.generated_ret_lines = mac_con_result.ret_lines  # type: ignore[attr-defined]
+            except Exception as exc:
+                logging.getLogger(__name__).exception('Erro ao validar MAC x CON: %s', exc)
     else:
         analysis_result = analyzer.analyze(sanitize_result.lines)
         analysis_section = analysis_result.section

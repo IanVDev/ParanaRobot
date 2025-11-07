@@ -29,17 +29,38 @@ class Reporter:
 
     def render(self, summary: ValidationSummary, base_dir: Path) -> ReportPaths:
         reports_dir = ensure_reports_dir(base_dir)
-        timestamp = _dt.datetime.now().strftime("%Y%m%d%H%M%S")
+        # create a subdirectory per lote/arquivo stem for better organization
         stem = summary.metadata.working_path.stem
-
-        json_path = reports_dir / f"{stem}.{timestamp}.json"
-        txt_path = reports_dir / f"{stem}.{timestamp}.txt"
+        target_dir = reports_dir / stem
+        target_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = _dt.datetime.now().strftime("%Y%m%d%H%M%S")
+        json_path = target_dir / f"{stem}.{timestamp}.json"
+        txt_path = target_dir / f"{stem}.{timestamp}.txt"
 
         json_payload = self._build_json(summary)
         text_payload = self._build_text(summary)
 
         write_json(json_path, json_payload)
         write_text(txt_path, text_payload)
+
+        # If the validation produced a generated RET (MAC x CON), write it to disk
+        generated = getattr(summary.metadata, "generated_ret_lines", None)
+        if generated:
+            # write as .FHMLRET11.d file under the same target dir
+            ret_name = f"{stem}.{timestamp}.FHMLRET11.d"
+            ret_path = target_dir / ret_name
+            # join lines with newline and persist
+            write_text(ret_path, "\n".join(generated) + "\n")
+            # augment the json payload on disk with ret metadata (rewrite)
+            # compute simple stats: counts of occurrences 16 and 17
+            count_16 = sum(1 for line in generated if line[111:113] == "16")
+            count_17 = sum(1 for line in generated if line[111:113] == "17")
+            json_payload.setdefault("ret11", {})
+            json_payload["ret11"]["path"] = str(ret_path)
+            json_payload["ret11"]["count_16"] = count_16
+            json_payload["ret11"]["count_17"] = count_17
+            json_payload["ret11"]["detail_count"] = len([l for l in generated if l.startswith("2")])
+            write_json(json_path, json_payload)
 
         return ReportPaths(json_path=json_path, txt_path=txt_path)
 
@@ -62,6 +83,7 @@ class Reporter:
                 "soma_detalhes": summary.totalizers.detail_sum,
                 "trailer": summary.totalizers.trailer_sum,
             },
+            # ret11 will be injected if present during render()
         }
 
     def _build_text(self, summary: ValidationSummary) -> str:
