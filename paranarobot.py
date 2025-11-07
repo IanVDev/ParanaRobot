@@ -179,6 +179,11 @@ def main() -> int:
         return 0
 
     base = Path("input") / "arquivos_para_comparacao"
+    # ensure the input directory exists to avoid confusion for operators
+    if not base.exists():
+        base.mkdir(parents=True, exist_ok=True)
+        logger.warning("Diretório %s não existia — criado automaticamente. Coloque lotes dentro dele e reexecute.", base)
+
     lots = find_lots(base)
     if not lots:
         logger.info("No lots found in %s", base)
