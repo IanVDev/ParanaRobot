@@ -1,0 +1,4 @@
+🟢 Revalidação final executada com sucesso.
+Linhas removidas: []
+Arquivo final: TESTSTEM.B254.D0000001.20251107.FHMLRET11_final.d
+Verifique summary_final.json na pasta correspondente para status final.

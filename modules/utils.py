@@ -204,6 +204,43 @@ def compute_status(issues: list[ValidationIssue]) -> ValidationStatus:
     return ValidationStatus.OK
 
 
+def split_into_batches(lines: Iterable[str]) -> list[list[str]]:
+    """Split a list/iterable of 240-char records into sub-lotes delimited by header (100) and trailer (300).
+
+    Returns a list of batches (each a list of lines). If a header is found without a following trailer,
+    the batch runs until the next header or EOF.
+    """
+    batches: list[list[str]] = []
+    current: list[str] = []
+    in_batch = False
+    for line in lines:
+        code = line[:3]
+        if code == HEADER_CODE:
+            # start new batch
+            if in_batch and current:
+                # previous batch didn't have trailer, close it
+                batches.append(current)
+                current = []
+            in_batch = True
+            current.append(line)
+            continue
+        if in_batch:
+            current.append(line)
+            if code == TRAILER_CODE:
+                batches.append(current)
+                current = []
+                in_batch = False
+        else:
+            # ignore lines before first header
+            continue
+
+    # if file ended while inside a batch, append it
+    if in_batch and current:
+        batches.append(current)
+
+    return batches
+
+
 __all__ = [
     "FileMetadata",
     "HEADER_CODE",
