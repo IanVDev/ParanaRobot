@@ -50,6 +50,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     configure_logging(getattr(logging, args.log_level.upper(), logging.INFO))
 
+    logger = logging.getLogger(__name__)
+
     unzipper = Unzipper()
     sanitizer = Sanitizer()
     validator = Validator()
@@ -71,14 +73,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         # prefer the full MAC validator when available
         mac_full = FHMLMacValidatorFull()
         mac_result = mac_full.validate(sanitize_result.lines)
+        # ensure we always have an analysis_result object for later totalizers
+        analysis_result = mac_result
         analysis_section = mac_result.section
 
         # attempt to locate a corresponding CON file in the same working directory
         con_lines = None
         try:
             working_dir = metadata.working_path.parent
-            # look for any file containing 'CON' in the name
-            candidate = next((p for p in working_dir.iterdir() if p.is_file() and 'CON' in p.name.upper()), None)
+            # look for any file containing 'CON' in the name (case-insensitive) and acceptable extensions
+            candidate = next(
+                (f for f in Path(working_dir).iterdir()
+                 if "CON" in f.name.upper() and f.suffix.lower() in (".txt", ".d", "")),
+                None,
+            )
             if candidate:
                 # Use Unzipper + Sanitizer to robustly prepare the CON file (handles ZIPs too)
                 con_extraction = unzipper.extract(candidate)
@@ -97,12 +105,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             maccon = FHMLMacConValidator()
             try:
                 mac_con_result = maccon.validate_pair(sanitize_result.lines, con_lines)
-                # attach content from mac_con_result (prefer these issues)
+                # prefer mac_con_result when available
+                analysis_result = mac_con_result
                 analysis_section = mac_con_result.section
                 # write RET11 generated to reports dir later via reporter (we'll attach to metadata as extra)
                 metadata.generated_ret_lines = mac_con_result.ret_lines  # type: ignore[attr-defined]
+                logger.info("Arquivo CON encontrado e comparado: %s", getattr(metadata, 'generated_ret_lines', None) and 'RET gerado')
             except Exception as exc:
-                logging.getLogger(__name__).exception('Erro ao validar MAC x CON: %s', exc)
+                logger.exception('Erro ao validar MAC x CON: %s', exc)
+                # keep analysis_result as mac_result
+        else:
+            logger.warning("Nenhum arquivo CON correspondente encontrado — usando análise MAC apenas.")
     else:
         analysis_result = analyzer.analyze(sanitize_result.lines)
         analysis_section = analysis_result.section

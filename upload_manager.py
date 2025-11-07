@@ -73,22 +73,24 @@ def find_lots(base: Path) -> List[Path]:
     for p in base.iterdir():
         if p.is_dir():
             lots.append(p)
-    # also consider files under base as a flat lot
-    has_zips = any(p.suffix.lower() == ".zip" for p in base.iterdir())
-    if has_zips:
+    # also consider files under base as a flat lot if it contains accepted payloads
+    accepted = {".zip", ".txt", ".d"}
+    has_payloads = any(p.suffix.lower() in accepted for p in base.iterdir() if p.is_file())
+    if has_payloads:
         lots.append(base)
     return lots
 
 
 def detect_mac_con_pair(lot_dir: Path, logger: logging.Logger) -> Optional[Tuple[Path, Path]]:
-    """Try to discover a MAC and CON zip pair in lot_dir.
+    """Try to discover a MAC and CON pair in lot_dir.
 
     Strategy:
-    - Look for files containing 'MAC' and 'CON' in their names.
+    - Look for files containing 'MAC' and 'CON' in their names with accepted extensions (.zip, .txt, .d).
     - Prefer pairs where replacing 'MAC' with 'CON' (case-insensitive) yields an existing filename.
     - Otherwise, pick the first MAC and the first CON found.
     """
-    files = [p for p in lot_dir.iterdir() if p.is_file() and p.suffix.lower() == ".zip"]
+    accepted = {".zip", ".txt", ".d"}
+    files = [p for p in lot_dir.iterdir() if p.is_file() and p.suffix.lower() in accepted]
     macs = [p for p in files if "MAC" in p.name.upper()]
     cons = [p for p in files if "CON" in p.name.upper()]
     if not macs:
@@ -130,19 +132,28 @@ def process_pair(mac_zip: Path, con_zip: Path, cfg: ManagerConfig, logger: loggi
     maccon_validator = FHMLMacConValidator()
     reporter = Reporter()
 
-    # Extract MAC
-    mac_extract = unzipper.extract(mac_zip)
-    if mac_extract.error or mac_extract.metadata is None:
-        logger.error("Failed to extract MAC %s: %s", mac_zip, mac_extract.error)
-        return False
-    mac_meta: FileMetadata = mac_extract.metadata
+    # Prepare MAC metadata: if zip, extract; otherwise use file directly
+    mac_meta: FileMetadata
+    if mac_zip.suffix.lower() == ".zip":
+        mac_extract = unzipper.extract(mac_zip)
+        if mac_extract.error or mac_extract.metadata is None:
+            logger.error("Failed to extract MAC %s: %s", mac_zip, mac_extract.error)
+            return False
+        mac_meta = mac_extract.metadata
+    else:
+        # plain .txt or .d: process in-place
+        mac_meta = FileMetadata(original_path=mac_zip, working_path=mac_zip, temp_dir=mac_zip.parent, extracted_from_zip=False)
 
-    # Extract CON
-    con_extract = unzipper.extract(con_zip)
-    if con_extract.error or con_extract.metadata is None:
-        logger.error("Failed to extract CON %s: %s", con_zip, con_extract.error)
-        return False
-    con_meta: FileMetadata = con_extract.metadata
+    # Prepare CON metadata
+    con_meta: FileMetadata
+    if con_zip.suffix.lower() == ".zip":
+        con_extract = unzipper.extract(con_zip)
+        if con_extract.error or con_extract.metadata is None:
+            logger.error("Failed to extract CON %s: %s", con_zip, con_extract.error)
+            return False
+        con_meta = con_extract.metadata
+    else:
+        con_meta = FileMetadata(original_path=con_zip, working_path=con_zip, temp_dir=con_zip.parent, extracted_from_zip=False)
 
     # Sanitize both
     mac_s = sanitizer.sanitize(mac_meta.working_path)
