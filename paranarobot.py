@@ -14,6 +14,8 @@ import argparse
 import json
 import logging
 import subprocess
+import shutil
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -32,6 +34,9 @@ def find_report_for_origin(origin: Path) -> Optional[Path]:
             payload = json.loads(jf.read_text(encoding="utf-8"))
         except Exception:
             continue
+        # only consider JSON objects (not arrays like summary_master.json)
+        if not isinstance(payload, dict):
+            continue
         origem = payload.get("origem") or payload.get("arquivo")
         if not origem:
             continue
@@ -43,9 +48,10 @@ def find_report_for_origin(origin: Path) -> Optional[Path]:
 
 
 def process_lot(lot: Path, logger: logging.Logger) -> Dict[str, str]:
-    status = "ERROR"
-    reason = ""
+    """Process a lot and move originals to `ja_testados` with logging.
 
+    Returns a dict with lot/status/reason.
+    """
     logger.info("Processing lot: %s", lot)
     pair = detect_mac_con_pair(lot, logger)
     if not pair:
@@ -55,67 +61,110 @@ def process_lot(lot: Path, logger: logging.Logger) -> Dict[str, str]:
     mac, con = pair
     logger.info("Detected MAC=%s CON=%s", mac.name, con.name)
 
-    # Run main.py on the MAC file to generate the initial report
-    try:
-        subprocess.run(["python3", "main.py", str(mac)], check=False)
-    except Exception as exc:
-        logger.exception("Failed to run main.py on %s: %s", mac, exc)
-        return {"lot": str(lot), "status": "ERROR", "reason": "main_fail"}
-
-    # Find the generated JSON for this MAC
-    json_path = find_report_for_origin(mac)
-    if not json_path:
-        logger.error("Report JSON not found for %s", mac)
-        return {"lot": str(lot), "status": "ERROR", "reason": "no_json"}
-
-    # Diagnose & generate corrected files
-    try:
-        fixed_files = diagnose_pipeline.diagnose_and_fix(json_path)
-    except SystemExit as se:
-        logger.warning("Diagnose pipeline exited early: %s", se)
-        fixed_files = []
-    except Exception as exc:
-        logger.exception("Diagnose pipeline failed for %s: %s", json_path, exc)
-        return {"lot": str(lot), "status": "ERROR", "reason": "diagnose_fail"}
-
-    if not fixed_files:
-        logger.info("No fixed files generated for %s; skipping finalize", lot)
-        return {"lot": str(lot), "status": "WARN", "reason": "no_fixed"}
-
-    # Re-validate each fixed file and finalize
     final_status = "ERROR"
-    for f in fixed_files:
+    reason = "unhandled"
+
+    try:
+        # Run main.py on the MAC file to generate the initial report
         try:
-            subprocess.run(["python3", "main.py", str(f)], check=False)
+            subprocess.run(["python3", "main.py", str(mac)], check=False)
         except Exception as exc:
-            logger.exception("Failed to re-run main.py on fixed file %s: %s", f, exc)
-            continue
+            logger.exception("Failed to run main.py on %s: %s", mac, exc)
+            return {"lot": str(lot), "status": "ERROR", "reason": "main_fail"}
 
-        # find JSON for the fixed file
-        jf = find_report_for_origin(f)
-        if not jf:
-            logger.warning("No report JSON found after re-validation for %s", f)
-            continue
+        # Find the generated JSON for this MAC
+        json_path = find_report_for_origin(mac)
+        if not json_path:
+            logger.error("Report JSON not found for %s", mac)
+            return {"lot": str(lot), "status": "ERROR", "reason": "no_json"}
 
-        # finalize using the revalidation JSON
+        # Diagnose & generate corrected files
         try:
-            finalize_pipeline.finalize_and_revalidate(str(jf))
+            fixed_files = diagnose_pipeline.diagnose_and_fix(json_path)
+        except SystemExit as se:
+            logger.warning("Diagnose pipeline exited early: %s", se)
+            fixed_files = []
         except Exception as exc:
-            logger.exception("Finalize pipeline failed for %s: %s", jf, exc)
-            continue
+            logger.exception("Diagnose pipeline failed for %s: %s", json_path, exc)
+            return {"lot": str(lot), "status": "ERROR", "reason": "diagnose_fail"}
 
-        # read summary_final.json if present
-        corr = Path(jf).parent.parent / "corrigido"
-        summary = corr / "summary_final.json"
-        if summary.exists():
+        if not fixed_files:
+            logger.info("No fixed files generated for %s; skipping finalize", lot)
+            final_status = "WARN"
+            reason = "no_fixed"
+            return {"lot": str(lot), "status": final_status, "reason": reason}
+
+        # Re-validate each fixed file and finalize
+        final_status = "ERROR"
+        for f in fixed_files:
             try:
-                payload = json.loads(summary.read_text(encoding="utf-8"))
-                st = payload.get("status") or "ERROR"
-                final_status = st
-            except Exception:
-                final_status = "ERROR"
+                subprocess.run(["python3", "main.py", str(f)], check=False)
+            except Exception as exc:
+                logger.exception("Failed to re-run main.py on fixed file %s: %s", f, exc)
+                continue
 
-    return {"lot": str(lot), "status": final_status, "reason": "finalized"}
+            # find JSON for the fixed file
+            jf = find_report_for_origin(f)
+            if not jf:
+                logger.warning("No report JSON found after re-validation for %s", f)
+                continue
+
+            # finalize using the revalidation JSON
+            try:
+                finalize_pipeline.finalize_and_revalidate(str(jf))
+            except Exception as exc:
+                logger.exception("Finalize pipeline failed for %s: %s", jf, exc)
+                continue
+
+            # read summary_final.json if present
+            corr = Path(jf).parent.parent / "corrigido"
+            summary = corr / "summary_final.json"
+            if summary.exists():
+                try:
+                    payload = json.loads(summary.read_text(encoding="utf-8"))
+                    st = payload.get("status") or "ERROR"
+                    final_status = st
+                    reason = "finalized"
+                except Exception:
+                    final_status = "ERROR"
+    finally:
+        # Ensure we move original files into ja_testados and log the attempt
+        try:
+            tested_dir = Path("input") / "ja_testados"
+            tested_dir.mkdir(parents=True, exist_ok=True)
+
+            # use timestamped subfolder to avoid collisions
+            ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+            dest_sub = tested_dir / ts
+            dest_sub.mkdir(parents=True, exist_ok=True)
+
+            # move mac and con
+            moved = []
+            for p in (mac, con):
+                try:
+                    if p.exists():
+                        target = dest_sub / p.name
+                        shutil.move(str(p), str(target))
+                        moved.append(target.name)
+                except Exception as exc:
+                    logger.exception("Failed to move %s to %s: %s", p, dest_sub, exc)
+
+            # if lot is a directory and is empty after moving, remove it
+            try:
+                if lot.is_dir() and not any(lot.iterdir()):
+                    lot.rmdir()
+            except Exception:
+                pass
+
+            # append to tested.log
+            log_path = tested_dir / "tested.log"
+            entry = f"{datetime.utcnow().isoformat()}\t{mac.name}\t{con.name}\t{final_status}\n"
+            with log_path.open("a", encoding="utf-8") as fh:
+                fh.write(entry)
+        except Exception:
+            logger.exception("Failed to record tested.log or move originals for %s", lot)
+
+    return {"lot": str(lot), "status": final_status, "reason": reason}
 
 
 def main() -> int:
