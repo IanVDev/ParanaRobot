@@ -1,4 +1,0 @@
-100TESTHEADER                                                                                                                                                                                                                                   
-200NB00000001                                                                                                                                                                                                                                   
-200NB00000002                                                                                                                                                                                                                                   
-300TESTTRAILER                                                                                                                                                                                                                                  
