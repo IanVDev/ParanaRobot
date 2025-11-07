@@ -80,12 +80,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             # look for any file containing 'CON' in the name
             candidate = next((p for p in working_dir.iterdir() if p.is_file() and 'CON' in p.name.upper()), None)
             if candidate:
-                # read and sanitize its lines quickly (reuse sanitizer)
-                with candidate.open('r', encoding='utf-8') as fh:
-                    con_text = fh.read()
-                # naive split by newline then pad/chunk to 240 if needed
-                con_lines = [line.rstrip('\n') for line in con_text.splitlines() if line.strip()]
-        except Exception:
+                # Use Unzipper + Sanitizer to robustly prepare the CON file (handles ZIPs too)
+                con_extraction = unzipper.extract(candidate)
+                if con_extraction.error or con_extraction.metadata is None:
+                    logging.getLogger(__name__).warning("Não foi possível extrair CON candidato %s: %s", candidate, con_extraction.error)
+                else:
+                    con_sanitize = sanitizer.sanitize(con_extraction.metadata.working_path)
+                    if con_sanitize.section.status.name == 'ERROR':
+                        logging.getLogger(__name__).warning("Sanitização CON retornou erro: %s", con_sanitize.section.issues)
+                    con_lines = con_sanitize.lines
+        except Exception as exc:
+            logging.getLogger(__name__).exception("Erro ao localizar/ler arquivo CON: %s", exc)
             con_lines = None
 
         if con_lines:
