@@ -1,3 +1,309 @@
+# -*- coding: utf-8 -*-
+
+"""
+FINALIZE_PIPELINE.PY
+--------------------
+
+Objetivo:
+- Ler DOIS arquivos na pasta ./input (ex: MAC e CON).
+- Comparar registros de detalhe (linhas tipo "200") entre eles.
+- Manter apenas os registros CONSISTENTES (presentes nos dois arquivos com mesmo identificador).
+- Gerar UM ÚNICO arquivo final FHMLRET11 no layout:
+    - 100: Header
+    - 200: Detalhes
+    - 900: Trailer
+  com TODAS as linhas com 240 bytes exatos.
+- Salvar SOMENTE em ./ready, sem gerar lixo em outras pastas.
+- Limpar pastas antigas usadas em testes (menos é mais).
+
+Instruções:
+- Coloque os dois arquivos de entrada em ./input
+- Ajuste, se necessário, as posições de nu_nb e valor na função extract_detail_key().
+- Rode:
+    python3 finalize_pipeline.py
+
+Resultado:
+- ./ready/<stem>.<timestamp>.FHMLRET11_final.d
+"""
+
+import os
+import shutil
+from pathlib import Path
+from datetime import datetime
+from typing import List, Tuple, Dict
+
+# ==============================
+# CONFIGURAÇÃO BÁSICA
+# ==============================
+
+BASE_DIR = Path(__file__).resolve().parent
+INPUT_DIR = BASE_DIR / "input"
+READY_DIR = BASE_DIR / "ready"
+
+# Pastas antigas que vamos limpar para não poluir
+UNUSED_DIRS = [
+    "reports",
+    "tmp",
+    "output",
+    "outputs",
+    "ret",
+    "logs",
+    "test",
+    "tests",
+    "input/ja_testados",
+]
+
+# Prefixo genérico do arquivo final (pode ajustar se quiser)
+STEM = "HMLMAC12.TESTE_FINAL"
+
+
+# ==============================
+# FUNÇÕES UTILITÁRIAS
+# ==============================
+
+def log(msg: str):
+    print(msg)
+
+
+def safe_rmtree(path: Path):
+    if path.exists():
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def ensure_ready_dir():
+    READY_DIR.mkdir(exist_ok=True)
+
+
+def clean_environment():
+    """
+    Remove pastas antigas/lixo de testes.
+    Não mexe na pasta input.
+    """
+    log("🧹 Limpando ambiente antigo...")
+    for folder in UNUSED_DIRS:
+        path = BASE_DIR / folder
+        if path.exists():
+            safe_rmtree(path)
+            log(f"   - Removido: {path}")
+    ensure_ready_dir()
+    log("✅ Ambiente limpo. Mantidos apenas 'input/' e 'ready/'.")
+
+
+def find_input_files() -> List[Path]:
+    """
+    Localiza os arquivos na pasta input.
+    Esperamos DOIS arquivos para comparação (ex: MAC e CON).
+    """
+    if not INPUT_DIR.exists():
+        raise FileNotFoundError("Pasta 'input/' não encontrada.")
+
+    # primeira tentativa: pathlib.iterdir()
+    files = [f for f in INPUT_DIR.iterdir() if f.is_file() and not f.name.startswith('.')]
+
+    # fallback seguro: alguns ambientes persistentes/sandbox podem não expor arquivos via iterdir()
+    if not files:
+        from os import listdir
+        from os.path import join, isfile
+
+        # debug: report listdir results in environments where iterdir fails
+        try:
+            _ls = list(listdir(INPUT_DIR))
+        except Exception:
+            _ls = None
+        # build fallback list
+        files = [
+            Path(join(INPUT_DIR, name))
+            for name in (_ls or [])
+            if isfile(join(INPUT_DIR, name)) and not name.startswith('.')
+        ]
+        # debug logging to help trace environment file visibility
+        log(f"[debug] pathlib_iterdir_empty -> os.listdir returned: {_ls}")
+        log(f"[debug] fallback files resolved: {[p.name for p in files]}")
+
+    if len(files) != 2:
+        raise ValueError(
+            f"Esperado exatamente 2 arquivos em 'input/', encontrado {len(files)}. "
+            f"Coloque somente os dois arquivos (MAC e CON) que serão comparados."
+        )
+
+    log("📂 Arquivos de entrada detectados:")
+    for f in files:
+        log(f"   - {f.name}")
+
+    return files
+
+
+# ==============================
+# EXTRAÇÃO DE DETALHES (LINHA 200)
+# ==============================
+
+def extract_detail_key(line: str) -> Tuple[str, str]:
+    """
+    Extrai a chave de comparação a partir de uma linha tipo 200.
+
+    IMPORTANTE:
+    Ajuste AQUI as posições de acordo com o layout real do seu arquivo.
+    Exemplo abaixo:
+      - nu_nb: posições 3 a 18
+      - valor: posições 92 a 107 (apenas exemplo!)
+    """
+
+    # Garante que a linha tenha pelo menos 240 chars (ou preenche)
+    if len(line) < 240:
+        line = line.rstrip("\n")
+        line = line.ljust(240)
+
+    nu_nb = line[3:18].strip()     # ajuste conforme layout oficial
+    valor = line[92:107].strip()   # ajuste conforme layout oficial
+
+    return nu_nb, valor
+
+
+def collect_details(file_path: Path) -> Dict[Tuple[str, str], str]:
+    """
+    Lê um arquivo e retorna um dict:
+      chave: (nu_nb, valor)
+      valor: linha original (200...) normalizada com 240 bytes
+
+    Somente linhas tipo '200' são consideradas.
+    """
+    details = {}
+    with file_path.open("r", encoding="utf-8") as f:
+        for raw in f:
+            line = raw.rstrip("\r\n")
+            if not line:
+                continue
+            if line.startswith("200"):
+                if len(line) < 240:
+                    line = line.ljust(240)
+                key = extract_detail_key(line)
+                details[key] = line[:240]
+    return details
+
+
+# ==============================
+# BUILDER FHMLRET11
+# ==============================
+
+def pad_240(s: str) -> str:
+    """
+    Garante exatamente 240 bytes (caracteres) na linha.
+    """
+    s = s[:240]
+    return s.ljust(240)
+
+
+def generate_fhmlret11(stem: str, consistent_details: List[Tuple[str, str]], timestamp: str) -> Path:
+    """
+    Gera o arquivo FHMLRET11 completo com:
+      - Header 100
+      - Detalhes 200 para cada registro consistente
+      - Trailer 900 com totalizadores
+    Todos com 240 bytes.
+    """
+
+    output_path = READY_DIR / f"{stem}.{timestamp}.FHMLRET11_final.d"
+    log(f"🧱 Gerando arquivo final FHMLRET11: {output_path.name}")
+
+    lines = []
+
+    # ---------- HEADER (100) ----------
+    # Ajuste conforme doc FHMLRET11 se necessário.
+    data_geracao = datetime.now().strftime("%Y%m%d")
+    hora_geracao = datetime.now().strftime("%H%M%S")
+
+    header = (
+        "100"                       # Tipo de registro
+        + "FHMLRET11"               # Identificação do layout / produto (exemplo)
+        + data_geracao              # Data geração
+        + hora_geracao              # Hora geração
+        + stem.ljust(30)            # Identificação do arquivo / remetente
+        + " " * 240                 # Padding
+    )
+    lines.append(pad_240(header))
+
+    # ---------- DETALHES (200) ----------
+    total_registros = 0
+    soma_valores = 0
+
+    for nu_nb, valor in consistent_details:
+        # valor aqui vem como string; ajuste conforme doc (ex: centavos sem ponto)
+        # Tenta normalizar para inteiro
+        try:
+            v_int = int("".join(filter(str.isdigit, valor))) if valor else 0
+        except ValueError:
+            v_int = 0
+
+        soma_valores += v_int
+        total_registros += 1
+
+        # Montagem da linha 200 - AJUSTE conforme doc FHMLRET11
+        detalhe = (
+            "200"                           # Tipo de registro
+            + nu_nb.ljust(20)               # Número NB / identificador
+            + str(v_int).rjust(15, "0")     # Valor em centavos (exemplo)
+            + " " * 240                     # Padding restante
+        )
+        lines.append(pad_240(detalhe))
+
+    # ---------- TRAILER (900) ----------
+    trailer = (
+        "900"                                   # Tipo de registro
+        + str(total_registros).rjust(9, "0")    # Quantidade de registros
+        + str(soma_valores).rjust(18, "0")      # Soma dos valores (exemplo)
+        + " " * 240                             # Padding
+    )
+    lines.append(pad_240(trailer))
+
+    # ---------- GRAVAÇÃO ----------
+    with output_path.open("w", encoding="utf-8", newline="\n") as f:
+        for line in lines:
+            f.write(line + "\n")
+
+    log(f"✅ FHMLRET11 completo gerado com {total_registros} registros consistentes.")
+    log(f"   Soma dos valores: {soma_valores}")
+    return output_path
+
+
+# ==============================
+# PIPELINE PRINCIPAL
+# ==============================
+
+def main():
+    log("\n🚀 Iniciando pipeline FHMLRET11 (versão limpa, menos é mais)...")
+
+    # 1. Limpa ambiente antigo (sem mexer em input)
+    clean_environment()
+
+    # 2. Localiza arquivos de entrada
+    files = find_input_files()
+    file_a, file_b = files[0], files[1]
+
+    # 3. Coleta detalhes dos dois arquivos
+    log("\n🔍 Coletando detalhes (linhas 200) dos arquivos...")
+    details_a = collect_details(file_a)
+    details_b = collect_details(file_b)
+
+    # 4. Calcula interseção (apenas registros consistentes nos dois arquivos)
+    log("🔄 Calculando registros consistentes entre os dois arquivos...")
+    keys_consistentes = sorted(set(details_a.keys()) & set(details_b.keys()))
+
+    if not keys_consistentes:
+        raise RuntimeError("Nenhum registro consistente encontrado entre os dois arquivos (linhas 200).")
+
+    consistent_details = list(keys_consistentes)
+    log(f"✅ Registros consistentes encontrados: {len(consistent_details)}")
+
+    # 5. Gera FHMLRET11 final único na pasta ready
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    output_path = generate_fhmlret11(STEM, consistent_details, timestamp)
+
+    log("\n🏁 Pipeline concluído com sucesso.")
+    log(f"📂 Arquivo pronto para envio ao Connect: {output_path}\n")
+
+
+if __name__ == "__main__":
+    main()
 #!/usr/bin/env python3
 """Finalize pipeline (renamed from fix_pipeline_final.py).
 

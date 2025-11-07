@@ -143,15 +143,18 @@ class FHMLMacValidatorFull:
             if trailer_valor_total != detail_sum:
                 issues.append(ValidationIssue(IssueSeverity.CRITICAL, f"Trailer: valor total não confere (esperado={detail_sum}, encontrado={trailer_valor_total})"))
 
-        # Determine inconsistidos: (for demo we suppress deterministic warnings)
+        # Determine inconsistidos: deterministic selection (2nd and 5th detail) if present
         inconsistidos: List[int] = []
-        # NOTE: original behaviour appended deterministic warnings for details 2 and 5.
-        # For the demo that should produce a clean OK, we skip adding those warnings here.
+        for t in (2, 5):
+            if t <= len(detail_indices):
+                inconsistidos.append(detail_indices[t - 1])
+                issues.append(
+                    ValidationIssue(IssueSeverity.WARNING, f"Detalhe inconsistente detectado (linha {detail_indices[t - 1]})", line_number=detail_indices[t - 1], record_type=DETAIL_CODE)
+                )
 
         # If no bloqueios found, warn
-        # (suppressed for demo to keep validation clean)
-        # if not bloqueios:
-        #     issues.append(ValidationIssue(IssueSeverity.WARNING, "Nenhum bloqueio (BLQ) encontrado entre detalhes"))
+        if not bloqueios:
+            issues.append(ValidationIssue(IssueSeverity.WARNING, "Nenhum bloqueio (BLQ) encontrado entre detalhes"))
 
         section = SectionReport(status=compute_status(issues), issues=issues)
         return FHMLMacFullResult(section=section, counters=counters, totalizers=totalizers, inconsistidos=inconsistidos, bloqueios=bloqueios)
