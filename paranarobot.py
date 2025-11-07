@@ -158,6 +158,17 @@ def process_lot(lot: Path, logger: logging.Logger) -> Dict[str, str]:
 
             # append to tested.log
             log_path = tested_dir / "tested.log"
+            # try to align tested.log status with summary_final.json if present
+            try:
+                summary_candidate = Path("reports") / mac.stem / "corrigido" / "summary_final.json"
+                if summary_candidate.exists():
+                    sp = json.loads(summary_candidate.read_text(encoding="utf-8"))
+                    # normalized status expected (OK/WARN/ERROR)
+                    final_status = sp.get("status") or final_status
+            except Exception:
+                # ignore and keep existing final_status
+                pass
+
             entry = f"{datetime.utcnow().isoformat()}\t{mac.name}\t{con.name}\t{final_status}\n"
             with log_path.open("a", encoding="utf-8") as fh:
                 fh.write(entry)

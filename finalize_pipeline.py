@@ -11,6 +11,9 @@ from pathlib import Path
 from datetime import datetime
 import shutil
 
+# FHMLRET11 builder (generates final .d ready for Connect)
+from fhml_ret11_builder import generate_fhmlret11
+
 
 def load_json(path):
     with open(path, "r", encoding="utf-8") as f:
@@ -176,6 +179,32 @@ def finalize_and_revalidate(json_path):
 
     print(f"✅ Arquivo final salvo em {output_file}")
 
+    # === Generate FHMLRET11 using builder from the cleaned final lines ===
+    fhml_path = None
+    try:
+        detalhes = [l for l in new_lines if l.startswith("200")]
+        registros = []
+        for d in detalhes:
+            # NU-NB positions 11-20 -> slice 10:20
+            nu_nb = d[10:20].strip()
+            # value cents at positions 18-32 -> slice 17:32
+            raw = d[17:32].strip()
+            val = 0.0
+            if raw.isdigit():
+                # treat as cents -> convert to reais
+                val = int(raw) / 100.0
+            registros.append({"nu_nb": nu_nb or None, "valor": val})
+
+        # choose output path under reports/<stem>/ret/
+        date_s = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+        ret_dir = base / "ret"
+        ret_dir.mkdir(parents=True, exist_ok=True)
+        fhml_name = f"{canonical_stem}.{date_s}.FHMLRET11_final.d"
+        fhml_path = ret_dir / fhml_name
+        generate_fhmlret11(fhml_path, registros)
+    except Exception as exc:
+        print(f"Falha ao gerar FHMLRET11 via builder: {exc}")
+
     # After writing canonical final, ensure there are no other *_final*.d in corrigido
     for p in corrigido_dir.glob("*_final*.d"):
         try:
@@ -218,6 +247,9 @@ def finalize_and_revalidate(json_path):
         "status": None,
         "report_json": None,
     }
+    # if the FHMLRET11 was created, include its path in the summary
+    if fhml_path is not None:
+        summary_payload["fhmlret11"] = str(fhml_path)
     if found_json:
         try:
             with found_json.open("r", encoding="utf-8") as fh:
