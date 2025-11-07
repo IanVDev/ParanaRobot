@@ -126,6 +126,11 @@ def is_processed(lot_dir: Path) -> bool:
 
 def process_pair(mac_zip: Path, con_zip: Path, cfg: ManagerConfig, logger: logging.Logger) -> bool:
     logger.info("Processing pair: MAC=%s CON=%s", mac_zip.name, con_zip.name)
+
+    # Security: only allow final files to be processed for sending to Connect
+    # This prevents accidental submission of intermediate corrected files.
+    if not mac_zip.name.lower().endswith("_final.d"):
+        raise RuntimeError("🚫 Apenas arquivos *_final.d podem ser enviados ao Connect.")
     unzipper = Unzipper()
     sanitizer = Sanitizer()
     validator = Validator()

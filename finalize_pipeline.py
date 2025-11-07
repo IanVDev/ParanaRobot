@@ -5,9 +5,11 @@ Removes inconsistent lines, recalculates trailer totals, produces a FINAL RET an
 places final artifacts in `input/arquivo_pronto_para_envio_connect`.
 """
 import json
+import re
 import subprocess
 from pathlib import Path
 from datetime import datetime
+import shutil
 
 
 def load_json(path):
@@ -23,9 +25,42 @@ def finalize_and_revalidate(json_path):
     # Localiza arquivo corrigido .d correspondente
     candidates = []
     if corrigido_dir.exists():
-        candidates = list(corrigido_dir.glob("*_fixed_*.d")) or list(corrigido_dir.glob("*_fixed.d"))
+        candidates = (
+            list(corrigido_dir.glob("*_fixed_*.d"))
+            + list(corrigido_dir.glob("*_fixed.d"))
+            + list(corrigido_dir.glob("*_fix*.d"))
+        )
+        # sort by modification time so the latest appears last
+        candidates = sorted(candidates, key=lambda p: p.stat().st_mtime)
 
+    # If no candidates in corrigido, try archive (previously moved versions)
     if not candidates:
+        archive_dir = base / "archive"
+        if archive_dir.exists():
+            archive_candidates = (
+                list(archive_dir.glob("*_fixed_*.d"))
+                + list(archive_dir.glob("*_fixed.d"))
+                + list(archive_dir.glob("*_fix*.d"))
+            )
+            archive_candidates = sorted(archive_candidates, key=lambda p: p.stat().st_mtime)
+            if archive_candidates:
+                # copy latest archived candidate back to corrigido for processing
+                latest = archive_candidates[-1]
+                corrigido_dir.mkdir(parents=True, exist_ok=True)
+                restored = corrigido_dir / latest.name
+                try:
+                    shutil.copy2(latest, restored)
+                    input_file = restored
+                    print(f"♻️ Restaurado arquivo de archive para {restored}")
+                except Exception as exc:
+                    print(f"Falha ao restaurar {latest} de archive: {exc}")
+                    input_file = None
+            else:
+                input_file = None
+        else:
+            input_file = None
+
+    if not candidates and not (input_file):
         origem = data.get("origem") or (data.get("validacao", {}) and data.get("origem"))
         if origem:
             p = Path(origem)
@@ -43,10 +78,38 @@ def finalize_and_revalidate(json_path):
         else:
             print("❌ Nenhum arquivo corrigido encontrado.")
             return
-    else:
+    elif candidates:
         input_file = candidates[-1]
 
-    output_file = corrigido_dir / (input_file.stem + "_final.d")
+    # Canonicalizar stem para evitar repetições como _final_final ou _fix_final
+    # remove trailing _final ou _fix[_NNN] patterns iterativamente
+    s = input_file.stem
+    while True:
+        new = re.sub(r"(_final|_fix(_\d+)?)$", "", s)
+        if new == s:
+            break
+        s = new
+    canonical_stem = s
+    output_file = corrigido_dir / (canonical_stem + "_final.d")
+
+    # Arquivo de archive dentro de reports/<stem>/archive/
+    archive_dir = base / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+
+    # Mover versões antigas (_final* e _fix*) para archive, exceto se for o futuro output
+    for p in list(corrigido_dir.glob("*_final*.d")) + list(corrigido_dir.glob("*_fix*.d")):
+        try:
+            # don't archive the input_file we're about to read or the final output we'll write
+            if p.resolve() in (output_file.resolve(), input_file.resolve()):
+                continue
+        except Exception:
+            pass
+        try:
+            target = archive_dir / p.name
+            print(f"📦 Arquivo antigo detectado e movendo para archive: {p.name} -> {target}")
+            shutil.move(str(p), str(target))
+        except Exception as exc:
+            print(f"Falha ao mover {p} para archive: {exc}")
 
     # Identifica linhas inconsistentes a remover
     inconsistent_lines = []
@@ -106,6 +169,20 @@ def finalize_and_revalidate(json_path):
 
     print(f"✅ Arquivo final salvo em {output_file}")
 
+    # After writing canonical final, ensure there are no other *_final*.d in corrigido
+    for p in corrigido_dir.glob("*_final*.d"):
+        try:
+            if p.resolve() == output_file.resolve():
+                continue
+        except Exception:
+            pass
+        try:
+            target = archive_dir / p.name
+            print(f"📦 Movendo final redundante para archive: {p.name} -> {target}")
+            shutil.move(str(p), str(target))
+        except Exception as exc:
+            print(f"Falha ao mover {p} para archive: {exc}")
+
     # Revalidar automaticamente
     subprocess.run(["python3", "main.py", str(output_file)], check=False)
 
@@ -156,8 +233,6 @@ def finalize_and_revalidate(json_path):
     target = Path.cwd() / "input" / "arquivo_pronto_para_envio_connect"
     target.mkdir(parents=True, exist_ok=True)
     try:
-        import shutil
-
         # copy final file
         shutil.copy2(output_file, target / output_file.name)
         # copy summary_final.json

@@ -1,6 +1,6 @@
 {
-  "arquivo": "HMLMAC12.B254.D0000001.20251107115628.FHMLRET11_fix_001_final",
-  "final_file": "/Users/ian/Documents/ParanaRobot/reports/HMLMAC12.B254.D0000001/corrigido/HMLMAC12.B254.D0000001.20251107115628.FHMLRET11_fix_001_final_final.d",
-  "status": "ERROR",
-  "report_json": "reports/HMLMAC12.B254.D0000001.20251107115628.FHMLRET11_fix_001_final_final/json/HMLMAC12.B254.D0000001.20251107115628.FHMLRET11_fix_001_final_final.20251107122238.json"
+  "arquivo": "TESTSTEM.B254.D0000001",
+  "final_file": "/var/folders/wj/px2t1s6d0r10932x50sf14200000gn/T/paranarobot_test_up9mbzac/reports/TESTSTEM.B254.D0000001/corrigido/TESTSTEM.B254.D0000001.20251107.FHMLRET11_final.d",
+  "status": null,
+  "report_json": null
 }
