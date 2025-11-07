@@ -17,6 +17,10 @@ import json
 import subprocess
 from pathlib import Path
 from typing import List
+import datetime as _dt
+
+# reuse split_into_batches from project
+from modules.utils import split_into_batches
 
 
 def load_json(path: Path) -> dict:
@@ -64,83 +68,74 @@ def diagnose_and_fix(json_path: Path) -> Path:
     # Prepare output dir
     fixed_dir = base / "corrigido"
     fixed_dir.mkdir(parents=True, exist_ok=True)
-    fixed_path = fixed_dir / (ret_file.stem + "_fix.d")
 
     # Read original lines
     with ret_file.open("r", encoding="utf-8") as fh:
         raw_lines = [ln.rstrip("\n") for ln in fh]
 
-    headers: List[str] = []
-    details: List[str] = []
-    trailers: List[str] = []
+    # Split into batches using project's util
+    batches = split_into_batches(raw_lines)
+    if not batches:
+        batches = [raw_lines]
 
-    for ln in raw_lines:
-        if not ln:
-            continue
-        code = ln[:3]
-        if code == "100":
-            headers.append(ln)
-        elif code == "200":
-            details.append(ln)
-        elif code == "300":
-            trailers.append(ln)
+    generated_fixed: List[Path] = []
+
+    for idx, batch in enumerate(batches, start=1):
+        headers = [ln for ln in batch if ln.startswith("100")]
+        details = [ln for ln in batch if ln.startswith("200")]
+        trailers = [ln for ln in batch if ln.startswith("300")]
+
+        header = headers[0] if headers else None
+
+        # ensure header date is valid (pos 9:17)
+        if header:
+            hd = header[:240]
+            date_field = hd[9:17]
+            try:
+                _dt.datetime.strptime(date_field, "%Y%m%d")
+            except Exception:
+                today = _dt.datetime.now().strftime("%Y%m%d")
+                hd = hd[:9] + today + hd[17:]
+                header = hd
         else:
-            # ignore unknown record types
-            continue
+            today = _dt.datetime.now().strftime("%Y%m%d")
+            header = ("100" + " " * 6 + today + " " * (240 - 17))[:240]
 
-    # If multiple headers, keep first; if none, try to use first line as header
-    header = headers[0] if headers else (raw_lines[0] if raw_lines and raw_lines[0].startswith("100") else None)
+        # compute totals from details
+        total_details = len(details)
+        total_value = 0
+        for ln in details:
+            val_slice = ln[17:32]
+            val_str = val_slice.strip()
+            if val_str.isdigit():
+                total_value += int(val_str)
 
-    # Compute sums from details (positions per Analyzer: valor_cents = line[17:32])
-    total_details = len(details)
-    total_value = 0
-    for ln in details:
-        val_slice = ln[17:32]
-        val_str = val_slice.strip()
-        if val_str.isdigit():
-            total_value += int(val_str)
-
-    # Build trailer: if existing trailer template use it, else create a simple one
-    if trailers:
-        trailer_template = trailers[-1]
-        # replace total_registros (9:17) and valor_total (17:32)
         total_registros_field = str(total_details).rjust(8, "0")
         total_valor_field = str(total_value).rjust(15, "0")
-        new_trailer = (
-            trailer_template[:9]
-            + total_registros_field
-            + total_valor_field
-            + trailer_template[32:240].ljust(240)
-        )
-    else:
-        # minimal trailer: start with '300', pad to 240 and insert counts
-        total_registros_field = str(total_details).rjust(8, "0")
-        total_valor_field = str(total_value).rjust(15, "0")
-        # positions: 0-3 type, 3-9 filler, 9-17 total_registros, 17-32 valor_total
-        new_trailer = (
-            "300" + " " * 6 + total_registros_field + total_valor_field + " " * (240 - 32)
-        )
 
-    fixed_lines: List[str] = []
-    if header:
-        fixed_lines.append(header[:240].ljust(240))
-    fixed_lines.extend([ln[:240].ljust(240) for ln in details])
-    fixed_lines.append(new_trailer[:240].ljust(240))
+        if trailers:
+            trailer_template = trailers[-1].ljust(240)
+            new_trailer = trailer_template[:9] + total_registros_field + total_valor_field + trailer_template[32:240]
+        else:
+            new_trailer = ("300" + " " * 6 + total_registros_field + total_valor_field + " " * (240 - 32))[:240]
 
-    # Persist corrected file
-    with fixed_path.open("w", encoding="utf-8") as fh:
-        for l in fixed_lines:
-            fh.write(l + "\n")
+        fixed_lines = [header[:240].ljust(240)]
+        fixed_lines.extend([ln[:240].ljust(240) for ln in details])
+        fixed_lines.append(new_trailer[:240].ljust(240))
+
+        batch_name = f"{ret_file.stem}_fix_{idx:03}.d"
+        batch_path = fixed_dir / batch_name
+        with batch_path.open("w", encoding="utf-8") as fh:
+            for l in fixed_lines:
+                fh.write(l + "\n")
+        generated_fixed.append(batch_path)
 
     # Save logs
     Path("fix_pipeline.log").write_text("\n".join(report_lines), encoding="utf-8")
     Path("resumo_leigo.txt").write_text("\n".join(resumo_leigo), encoding="utf-8")
 
-    print(f"✅ Diagnóstico salvo em fix_pipeline.log")
-    print(f"✅ Resumo leigo salvo em resumo_leigo.txt")
-    print(f"✅ Arquivo corrigido salvo em {fixed_path}")
-
-    return fixed_path
+    print(f"✅ {len(generated_fixed)} arquivos corrigidos gerados em {fixed_dir}")
+    return generated_fixed
 
 
 def main(argv: List[str] | None = None) -> int:
@@ -158,13 +153,57 @@ def main(argv: List[str] | None = None) -> int:
 
     fixed = diagnose_and_fix(json_path)
 
-    # Re-run paranarobot on the fixed file to update reports/summary
-    try:
-        print(f"🔁 Reexecutando paranarobot (main.py) sobre {fixed} ...")
-        subprocess.run(["python3", "main.py", str(fixed)], check=False)
-    except Exception as exc:
-        print(f"Falha ao reexecutar main.py: {exc}")
+    # Re-run paranarobot on the fixed file(s) to update reports/summary
+    fixed_dir = Path(json_path).parent.parent / "corrigido"
+    summary_entries = []
+    for f in (fixed if isinstance(fixed, list) else [fixed]):
+        try:
+            print(f"🔁 Reexecutando paranarobot (main.py) sobre {f} ...")
+            subprocess.run(["python3", "main.py", str(f)], check=False)
+        except Exception as exc:
+            print(f"Falha ao reexecutar main.py sobre {f}: {exc}")
 
+        # try to find the generated JSON that references this file in its 'origem'
+        status = "UNKNOWN"
+        found_json = None
+        for jf in Path("reports").rglob("*.json"):
+            try:
+                with jf.open("r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+                origem_val = payload.get("origem")
+                if origem_val == str(f) or origem_val == str(Path(f).resolve()):
+                    found_json = jf
+                    status = payload.get("validacao", {}).get("conteudo", "UNKNOWN")
+                    break
+            except Exception:
+                continue
+
+        entry = {
+            "fixed_file": str(f),
+            "status": status,
+            "report_json": str(found_json) if found_json else None,
+        }
+        summary_entries.append(entry)
+
+    # write a summary_multilot.json in the corrigido directory
+    summary_path = fixed_dir / "summary_multilot.json"
+    overall = "OK"
+    for e in summary_entries:
+        if e["status"] == "ERROR":
+            overall = "ERROR"
+            break
+        if e["status"] == "WARN" and overall != "ERROR":
+            overall = "WARN"
+
+    summary_payload = {
+        "arquivo": Path(json_path).parent.parent.name,
+        "generated": summary_entries,
+        "status_geral": overall,
+    }
+    with summary_path.open("w", encoding="utf-8") as fh:
+        json.dump(summary_payload, fh, indent=2, ensure_ascii=False)
+
+    print(f"✅ summary_multilot escrito em {summary_path}")
     return 0
 
 

@@ -231,7 +231,11 @@ def run_manager(cfg: ManagerConfig) -> None:
 
 def parse_args(argv: Optional[list[str]] = None) -> ManagerConfig:
     parser = argparse.ArgumentParser(description="Upload manager for ParanaRobot")
-    parser.add_argument("--watch", default="./input", help="Base input directory to watch")
+    parser.add_argument(
+        "--watch",
+        default="./input/arquivos_para_comparacao",
+        help="Base input directory to watch (default: ./input/arquivos_para_comparacao)",
+    )
     parser.add_argument("--reports", default="./reports", help="Base reports directory")
     parser.add_argument("--logs", default="./logs", help="Logs directory")
     parser.add_argument("--poll-interval", type=int, default=5, help="Polling interval in seconds")
