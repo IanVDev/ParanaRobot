@@ -123,63 +123,74 @@ def pad(line: str) -> str:
     return line[:240].ljust(240)
 
 # ---------------- BUILDER FHMLRET11 ----------------
-def build_fhmlret11(inconsistentes):
-    """Gera FHMLRET11 apenas com os registros inconsistentes.
-
-    Sequência (NU-SEQ): header = 0000001, detalhes a partir de 0000002, trailer = last_detail + 1
-    """
+def build_fhmlret11(mac, con):
     now = datetime.now()
-    data_geracao = now.strftime('%Y%m%d')
-    competencia = now.strftime('%Y%m')
-    timestamp = now.strftime('%Y%m%d%H%M%S')
+    data_geracao = now.strftime("%Y%m%d")
+    competencia = now.strftime("%Y%m")
+    timestamp = now.strftime("%Y%m%d%H%M%S")
 
     out_path = READY_DIR / f"{STEM}.{timestamp}.FHMLRET11_final.d"
+    seq = 1
+    total_valor = 0
 
-    # total valor soma apenas os valores dos inconsistentes
-    total_valor = sum(int(''.join(filter(str.isdigit, v))) if v else 0 for (_, _, v) in inconsistentes)
-    qtd = len(inconsistentes)
-
-    seq = 1  # header sequence
-    with open(out_path, 'w', encoding='utf-8') as f:
-        # HEADER ----------------------------------------------------
+    with open(out_path, "w", encoding="utf-8") as f:
+        # HEADER
         header = (
-            '1' + f"{seq:07d}" + '03' + '254' + '01' +
-            data_geracao + '03' + competencia +
-            'CONPAG' + ' ' * 57 + '000001' + ' ' * 140
+            "1" + "0000001" + "03" + "254" + "01" +
+            data_geracao + "03" + competencia +
+            "CONPAG" + " " * 57 + "000001" + " " * 140
         )
-        f.write(pad(header) + '\n')
+        f.write(pad(header) + "\n")
+        seq += 1
 
-        # DETALHES -------------------------------------------------
-        seq += 1  # first detail sequence (0000002)
-        for (lote, nu_nb), code, valor_str in inconsistentes:
-            valor = int(''.join(filter(str.isdigit, valor_str))) if valor_str else 0
+        # DETALHES – apenas inconsistentes
+        for (lote, nu_nb), mac_data in mac.items():
+            # ignora MAC consistente (00)
+            if mac_data.get("cs_ocorrencia", "").strip() == "00":
+                continue
+
+            reg_con = con.get((lote, nu_nb))
+            if not reg_con:
+                continue  # ignora ausente no CON (não gera 99 mais)
+
+            cod = None
+            if mac_data["conta"] != reg_con["conta"]:
+                cod = "16"
+            elif mac_data["cpf"] != reg_con["cpf"]:
+                cod = "17"
+            else:
+                continue  # se não há divergência real, pula
+
+            valor = int("".join(filter(str.isdigit, mac_data["valor"]))) if mac_data["valor"] else 0
+            total_valor += valor
+
             detalhe = (
-                '2' + f"{seq:07d}" +
+                "2" + f"{seq:07d}" +
                 nu_nb.ljust(10) +
-                '20250228' + '20250201' + '01' +
-                data_geracao + '000001' +
-                f"{valor:012d}" + '8' + '20250331' +
-                ' ' * 40 + f"{int(code):02d}" + '01' + ' ' * 125
+                "20250228" + "20250201" + "01" +
+                data_geracao + "000001" +
+                f"{valor:012d}" + "8" + "20250331" +
+                " " * 40 + f"{cod}" + "01" + " " * 125
             )
-            f.write(pad(detalhe) + '\n')
+            f.write(pad(detalhe) + "\n")
             seq += 1
 
-        # TRAILER --------------------------------------------------
-        # seq currently = last_detail_seq + 1, which is the trailer NU-SEQ
-        trailer_seq = f"{seq:07d}"
+        # TRAILER
+        qtd = seq - 2  # desconta header
         trailer = (
-            '3' + trailer_seq + '03' + '254' +
+            "3" + "0000001" + "03" + "254" +
             f"{qtd:08d}" + f"{total_valor:017d}" +
-            '03' + f"{qtd:08d}" + f"{total_valor:017d}" +
-            '00000000' + '00000000000000000' +
-            '00000000' + '00000000000000000' +
-            '00000000' + '00000000000000000' +
-            ' ' * 100
+            "03" + f"{qtd:08d}" + f"{total_valor:017d}" +
+            "00000000" + "00000000000000000" +
+            "00000000" + "00000000000000000" +
+            "00000000" + "00000000000000000" +
+            " " * 100
         )
-        f.write(pad(trailer) + '\n')
+        f.write(pad(trailer) + "\n")
 
-    print(f"✅ FHMLRET11 (inconsistências) gerado: {out_path}")
-    print("   ➤ Apenas registros inconsistentes incluídos")
+    print(f"✅ FHMLRET11 (somente inconsistentes) gerado: {out_path}")
+    print("   ➤ Somente ocorrências 16 e 17 incluídas")
+    print("   ➤ Linhas 240 bytes garantidas")
     return out_path
 
 # ---------------- DEBUG: MOSTRAR CAMPOS EXTRAÍDOS ----------------
@@ -222,17 +233,13 @@ def main():
     mac_path, mac_enc, con_path, con_enc = detect_encoding_and_type()
     mac = read_details(mac_path, mac_enc)
     con = read_details(con_path, con_enc)
-    # Calcula inconsistências aplicando as regras solicitadas
-    inconsistentes = comparar(mac, con)
-    # Filtra apenas códigos válidos (16,17,99)
-    inconsistentes_validos = [it for it in inconsistentes if str(it[1]) in ("16", "17", "99")]
-
     # Opcional: mostrar debug resumido
     debug_show_records(mac, con)
     debug_compare(mac, con)
 
-    # Gera arquivo contendo apenas inconsistências
-    build_fhmlret11(inconsistentes_validos)
+    # Gera arquivo contendo apenas inconsistências (a função build_fhmlret11
+    # faz a filtragem interna por 16/17 conforme nova regra)
+    build_fhmlret11(mac, con)
 
 if __name__ == "__main__":
     main()
