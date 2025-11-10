@@ -43,25 +43,51 @@ def clean_environment():
             shutil.rmtree(path, ignore_errors=True)
     READY_DIR.mkdir(exist_ok=True)
 
-def list_input_files():
-    """Lista exatamente 2 arquivos na pasta input (MAC e CON)"""
+def detect_encoding_and_type():
+    """Detecta qual arquivo é MAC e qual é CON, com fallback para cp500 (EBCDIC).
+
+    Retorna: (mac_path, mac_encoding, con_path, con_encoding)
+    """
     files = [f for f in INPUT_DIR.iterdir() if f.is_file() and not f.name.startswith(".")]
-    if not files:
-        from os import listdir
-        from os.path import join, isfile
-        files = [Path(join(INPUT_DIR, n)) for n in listdir(INPUT_DIR)
-                 if isfile(join(INPUT_DIR, n)) and not n.startswith(".")]
     if len(files) != 2:
         raise RuntimeError("Coloque exatamente 2 arquivos (MAC e CON) na pasta input/")
-    return sorted(files)
 
-def read_details(path: Path):
-    """Lê linhas tipo 200 e extrai campos conforme doc"""
+    def try_open(path, encoding):
+        try:
+            with open(path, "r", encoding=encoding, errors="ignore") as f:
+                lines = [line for line in f.readlines() if line.strip()]
+            count_2 = sum(1 for l in lines if l.strip().startswith("2"))
+            return count_2
+        except Exception:
+            return 0
+
+    results = []
+    for file in files:
+        count_latin = try_open(file, "latin-1")
+        count_cp500 = try_open(file, "cp500")
+        if count_latin >= count_cp500:
+            encoding = "latin-1"
+            count_final = count_latin
+        else:
+            encoding = "cp500"
+            count_final = count_cp500
+        results.append((file, encoding, count_final))
+
+    # Ordena: o arquivo com mais linhas tipo "2" é o MAC
+    results.sort(key=lambda x: x[2], reverse=True)
+    mac_file, mac_enc, _ = results[0]
+    con_file, con_enc, _ = results[1]
+
+    print(f"[INFO] MAC file: {mac_file.name} (encoding={mac_enc})")
+    print(f"[INFO] CON file: {con_file.name} (encoding={con_enc})")
+    return mac_file, mac_enc, con_file, con_enc
+
+def read_details(path: Path, encoding: str):
+    """Lê linhas tipo 200 e extrai campos conforme doc (com codificação detectada)."""
     regs = {}
-    # Alguns arquivos de entrada podem ter encoding legacy (ISO-8859-1). Abrimos com latin-1 para robustez.
-    with open(path, "r", encoding="latin-1") as f:
+    with open(path, "r", encoding=encoding, errors="ignore") as f:
         for line in f:
-            if not line.startswith("2"):
+            if not line.strip().startswith("2"):
                 continue
             line = line.rstrip("\r\n").ljust(240)
             lote = line[8:10]
@@ -73,113 +99,127 @@ def read_details(path: Path):
     return regs
 
 def comparar(mac, con):
-    """Aplica Regras A e B da doc, retorna inconsistências (key, CS-OCORRENCIA, valor)"""
+    """Aplica Regras A e B da doc, retorna inconsistências (key, CS-OCORRENCIA, valor).
+    (Mantido para compatibilidade; a geração completa usa build_fhmlret11(mac,con))."""
     inconsistentes = []
     for key, reg_mac in mac.items():
         reg_con = con.get(key)
         if not reg_con:
             continue
-        if key[0] == "20" and reg_mac["conta"] != reg_con["conta"]:
-            inconsistentes.append((key, 16, reg_mac["valor"]))
-        elif key[0] == "21" and reg_mac["cpf"] != reg_con["cpf"]:
-            inconsistentes.append((key, 17, reg_mac["valor"]))
+        if key[0] == "20" and reg_mac.get("conta") != reg_con.get("conta"):
+            inconsistentes.append((key, 16, reg_mac.get("valor")))
+        elif key[0] == "21" and reg_mac.get("cpf") != reg_con.get("cpf"):
+            inconsistentes.append((key, 17, reg_mac.get("valor")))
     return inconsistentes
 
 def pad(line: str) -> str:
     return line[:240].ljust(240)
 
 # ---------------- BUILDER FHMLRET11 ----------------
-def build_fhmlret11(inconsistentes):
+def build_fhmlret11(mac, con):
     now = datetime.now()
-    data_geracao = now.strftime("%Y%m%d")
-    competencia = now.strftime("%Y%m")
-    timestamp = now.strftime("%Y%m%d%H%M%S")
+    data_geracao = now.strftime('%Y%m%d')
+    competencia = now.strftime('%Y%m')
+    timestamp = now.strftime('%Y%m%d%H%M%S')
 
     out_path = READY_DIR / f"{STEM}.{timestamp}.FHMLRET11_final.d"
+    seq = 1
+    total_valor = 0
 
-    qtd = len(inconsistentes)
-    total_valor = sum(
-        int("".join(filter(str.isdigit, v))) if v else 0
-        for (_, _, v) in inconsistentes
-    )
-
-    with open(out_path, "w", encoding="utf-8") as f:
+    with open(out_path, 'w', encoding='utf-8') as f:
         # HEADER ----------------------------------------------------
         header = (
-            "1"                       # 01 CS-TIPO-REGISTRO
-            + "0000001"               # 02–08 NU-SEQ-REGISTRO
-            + "03"                    # 09–10 CS-TIPO-LOTE
-            + "254"                   # 11–13 ID-BANCO
-            + "01"                    # 14–15 CS-MEIO-PAGTO
-            + data_geracao            # 16–23 DT-GRAVACAO-LOTE
-            + "03"                    # 24–25 NU-SEQ-LOTE
-            + competencia             # 26–31 DT-COMP-VENCIMEN
-            + "CONPAG"                # 32–37 NM-SISTEMA
-            + " " * 57                # 38–94 FILLER
-            + "000001"                # 95–100 NU-CTRL-TRANS
-            + " " * 140               # 101–240 FILLER
+            '1' + '0000001' + '03' + '254' + '01' +
+            data_geracao + '03' + competencia +
+            'CONPAG' + ' ' * 57 + '000001' + ' ' * 140
         )
-        f.write(pad(header) + "\n")
+        f.write(pad(header) + '\n')
 
         # DETALHES -------------------------------------------------
-        seq = 1
-        for (lote, nu_nb), cod, valor_str in inconsistentes:
-            valor = int("".join(filter(str.isdigit, valor_str))) if valor_str else 0
+        for (lote, nu_nb), mac_data in mac.items():
+            reg_con = con.get((lote, nu_nb))
+            cod = '00'  # padrão sem divergência
+            if not reg_con:
+                cod = '99'  # ausente no CON
+            else:
+                if mac_data['conta'] != reg_con['conta']:
+                    cod = '16'
+                elif mac_data['cpf'] != reg_con['cpf']:
+                    cod = '17'
+
+            valor = int(''.join(filter(str.isdigit, mac_data['valor']))) if mac_data['valor'] else 0
+            total_valor += valor
             detalhe = (
-                "2"                           # 01 CS-TIPO-REGISTRO
-                + f"{seq:07d}"                # 02–08 NU-SEQ-REGISTRO
-                + nu_nb.ljust(10)             # 09–18 NU-NB
-                + "20250228"                  # 19–26 DT-FIM-PERIODO
-                + "20250201"                  # 27–34 DT-INI-PERIODO
-                + "01"                        # 35–36 CS-NATUR-CREDITO
-                + data_geracao                # 37–44 DT-MOV-CREDITO
-                + "000001"                    # 45–50 ID-ORGAO-PAGADOR
-                + f"{valor:012d}"             # 51–62 VL-LIQ-CREDITO
-                + "8"                         # 63 CS-UNID-MONET
-                + "20250331"                  # 64–71 DT-FIM-VALIDADE
-                + " " * 40                    # 72–111 FILLER
-                + f"{cod:02d}"                # 112–113 CS-OCORRENCIA
-                + "01"                        # 114–115 CS-ORIGEM-ORCAMENTO
-                + " " * 125                   # 116–240 FILLER
+                '2' + f"{seq:07d}" +
+                nu_nb.ljust(10) +
+                '20250228' + '20250201' + '01' +
+                data_geracao + '000001' +
+                f"{valor:012d}" + '8' + '20250331' +
+                ' ' * 40 + f"{cod}" + '01' + ' ' * 125
             )
-            f.write(pad(detalhe) + "\n")
+            f.write(pad(detalhe) + '\n')
             seq += 1
 
         # TRAILER --------------------------------------------------
+        qtd = len(mac)
         trailer = (
-            "3"                             # 01 CS-TIPO-REGISTRO
-            + "0000001"                     # 02–08 NU-SEQ-REGISTRO
-            + "03"                          # 09–10 CS-TIPO-LOTE
-            + "254"                         # 11–13 ID-BANCO
-            + f"{qtd:08d}"                  # 14–21 QT-REG-DETALHE
-            + f"{total_valor:017d}"         # 22–38 VL-REG-DETALHE
-            + "03"                          # 39–40 NU-SEQ-LOTE
-            + f"{qtd:08d}"                  # 41–48 QT-REG-DETALHE-FRGPS
-            + f"{total_valor:017d}"         # 49–65 VL-REG-DETALHE-FRGPS
-            + "00000000"                    # 66–73 QT-REG-DETALHE-LOAS
-            + "00000000000000000"           # 74–90 VL-REG-DETALHE-LOAS
-            + "00000000"                    # 91–98 QT-REG-DETALHE-EPU
-            + "00000000000000000"           # 99–115 VL-REG-DETALHE-EPU
-            + "00000000"                    # 116–123 QT-REG-DETALHE-EPEX
-            + "00000000000000000"           # 124–140 VL-REG-DETALHE-EPEX
-            + " " * 100                     # 141–240 FILLER
+            '3' + '0000001' + '03' + '254' +
+            f"{qtd:08d}" + f"{total_valor:017d}" +
+            '03' + f"{qtd:08d}" + f"{total_valor:017d}" +
+            '00000000' + '00000000000000000' +
+            '00000000' + '00000000000000000' +
+            '00000000' + '00000000000000000' +
+            ' ' * 100
         )
-        f.write(pad(trailer) + "\n")
+        f.write(pad(trailer) + '\n')
 
-    print(f"✅ FHMLRET11 final gerado: {out_path}")
+    print(f"✅ FHMLRET11 completo gerado: {out_path}")
     print("   ➤ Conforme DOC FHMLRET11 – Pronto para envio ao Connect")
     print("   ➤ Linhas 240 bytes garantidas")
     return out_path
 
+# ---------------- DEBUG: MOSTRAR CAMPOS EXTRAÍDOS ----------------
+def debug_show_records(mac, con):
+    print("\n🧭 DEBUG: primeiros registros extraídos (tipo 200)\n")
+    print("Arquivo MAC:")
+    for i, ((lote, nb), data) in enumerate(mac.items()):
+        if i >= 5:
+            break
+        print(f"  Lote={lote} | NB={nb} | Conta={data['conta']} | CPF={data['cpf']} | Valor={data['valor']}")
+    print("\nArquivo CON:")
+    for i, ((lote, nb), data) in enumerate(con.items()):
+        if i >= 5:
+            break
+        print(f"  Lote={lote} | NB={nb} | Conta={data['conta']} | CPF={data['cpf']} | Valor={data['valor']}")
+
+
+def debug_compare(mac, con):
+    print("\n🧩 DEBUG: comparando campos MAC × CON\n")
+    for key, reg_mac in mac.items():
+        reg_con = con.get(key)
+        if not reg_con:
+            print(f"  ❌ Ausente no CON: {key}")
+            continue
+        diff = []
+        if reg_mac['conta'] != reg_con['conta']:
+            diff.append(f"Conta: {reg_mac['conta']} ≠ {reg_con['conta']}")
+        if reg_mac['cpf'] != reg_con['cpf']:
+            diff.append(f"CPF: {reg_mac['cpf']} ≠ {reg_con['cpf']}")
+        if reg_mac['valor'] != reg_con['valor']:
+            diff.append(f"Valor: {reg_mac['valor']} ≠ {reg_con['valor']}")
+        if diff:
+            print(f"  ⚠️ Diferença em {key}: {', '.join(diff)}")
+    print("\n✔️ Fim da verificação de divergências.\n")
+
+
 # ---------------- MAIN ----------------
 def main():
     clean_environment()
-    mac_path, con_path = list_input_files()
-    mac = read_details(mac_path)
-    con = read_details(con_path)
-    inconsistentes = comparar(mac, con)
-    # Gera sempre o arquivo, mesmo se não houver inconsistências
-    build_fhmlret11(inconsistentes)
+    mac_path, mac_enc, con_path, con_enc = detect_encoding_and_type()
+    mac = read_details(mac_path, mac_enc)
+    con = read_details(con_path, con_enc)
+    # Gera sempre o arquivo completo (header, detalhes para todos os MAC e trailer)
+    build_fhmlret11(mac, con)
 
 if __name__ == "__main__":
     main()
