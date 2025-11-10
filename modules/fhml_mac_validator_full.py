@@ -148,7 +148,9 @@ class FHMLMacValidatorFull:
         for t in (2, 5):
             if t <= len(detail_indices):
                 inconsistidos.append(detail_indices[t - 1])
-                issues.append(ValidationIssue(IssueSeverity.WARNING, f"Detalhe inconsistente detectado (linha {detail_indices[t - 1]})", line_number=detail_indices[t - 1], record_type=DETAIL_CODE))
+                issues.append(
+                    ValidationIssue(IssueSeverity.WARNING, f"Detalhe inconsistente detectado (linha {detail_indices[t - 1]})", line_number=detail_indices[t - 1], record_type=DETAIL_CODE)
+                )
 
         # If no bloqueios found, warn
         if not bloqueios:

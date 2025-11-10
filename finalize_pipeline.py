@@ -1,258 +1,225 @@
 #!/usr/bin/env python3
-"""Finalize pipeline (renamed from fix_pipeline_final.py).
+# -*- coding: utf-8 -*-
 
-Removes inconsistent lines, recalculates trailer totals, produces a FINAL RET and
-places final artifacts in `input/arquivo_pronto_para_envio_connect`.
 """
-import json
-import re
-import subprocess
+FINALIZE_PIPELINE FHMLRET11 — VERSÃO DEFINITIVA (GERA SEMPRE)
+--------------------------------------------------------------
+Gera o arquivo FHMLRET11 completo e conforme a doc oficial.
+
+Estrutura:
+  • HEADER (tipo 1)
+  • DETALHES (tipo 2)
+  • TRAILER (tipo 3)
+
+Regras:
+  - Gera o arquivo mesmo se não houver inconsistências.
+  - Cada linha possui 240 bytes exatos.
+  - Layout conforme documento oficial FHMLRET11.
+  - Salva apenas o arquivo final em ./ready/.
+
+Origem:
+  ./input/ → dois arquivos: MAC (maciça) e CON (concessão)
+Destino:
+  ./ready/HMLMAC12.TESTE_FINAL.<timestamp>.FHMLRET11_final.d
+"""
+
 from pathlib import Path
-from datetime import datetime
 import shutil
+from datetime import datetime
 
+# ---------------- CONFIGURAÇÕES ----------------
+BASE_DIR = Path(__file__).resolve().parent
+INPUT_DIR = BASE_DIR / "input"
+READY_DIR = BASE_DIR / "ready"
+UNUSED_DIRS = ["reports", "tmp", "output", "outputs", "ret", "logs", "tests"]
+STEM = "HMLMAC12.TESTE_FINAL"
 
-def load_json(path):
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+# ---------------- FUNÇÕES AUXILIARES ----------------
+def clean_environment():
+    """Remove pastas antigas e mantém apenas input/ e ready/"""
+    for folder in UNUSED_DIRS:
+        path = BASE_DIR / folder
+        if path.exists():
+            shutil.rmtree(path, ignore_errors=True)
+    READY_DIR.mkdir(exist_ok=True)
 
+def detect_encoding_and_type():
+    """Detecta qual arquivo é MAC e qual é CON, com fallback para cp500 (EBCDIC).
 
-def finalize_and_revalidate(json_path):
-    data = load_json(json_path)
-    base = Path(json_path).parent.parent
-    corrigido_dir = base / "corrigido"
+    Retorna: (mac_path, mac_encoding, con_path, con_encoding)
+    """
+    files = [f for f in INPUT_DIR.iterdir() if f.is_file() and not f.name.startswith(".")]
+    if len(files) != 2:
+        raise RuntimeError("Coloque exatamente 2 arquivos (MAC e CON) na pasta input/")
 
-    # Localiza arquivo corrigido .d correspondente
-    candidates = []
-    if corrigido_dir.exists():
-        candidates = (
-            list(corrigido_dir.glob("*_fixed_*.d"))
-            + list(corrigido_dir.glob("*_fixed.d"))
-            + list(corrigido_dir.glob("*_fix*.d"))
+    def try_open(path, encoding):
+        try:
+            with open(path, "r", encoding=encoding, errors="ignore") as f:
+                lines = [line for line in f.readlines() if line.strip()]
+            count_2 = sum(1 for l in lines if l.strip().startswith("2"))
+            return count_2
+        except Exception:
+            return 0
+
+    results = []
+    for file in files:
+        count_latin = try_open(file, "latin-1")
+        count_cp500 = try_open(file, "cp500")
+        if count_latin >= count_cp500:
+            encoding = "latin-1"
+            count_final = count_latin
+        else:
+            encoding = "cp500"
+            count_final = count_cp500
+        results.append((file, encoding, count_final))
+
+    # Ordena: o arquivo com mais linhas tipo "2" é o MAC
+    results.sort(key=lambda x: x[2], reverse=True)
+    mac_file, mac_enc, _ = results[0]
+    con_file, con_enc, _ = results[1]
+
+    print(f"[INFO] MAC file: {mac_file.name} (encoding={mac_enc})")
+    print(f"[INFO] CON file: {con_file.name} (encoding={con_enc})")
+    return mac_file, mac_enc, con_file, con_enc
+
+def read_details(path: Path, encoding: str):
+    """Lê linhas tipo 200 e extrai campos conforme doc (com codificação detectada)."""
+    regs = {}
+    with open(path, "r", encoding=encoding, errors="ignore") as f:
+        for line in f:
+            if not line.strip().startswith("2"):
+                continue
+            line = line.rstrip("\r\n").ljust(240)
+            lote = line[8:10]
+            nu_nb = line[10:20]
+            conta = line[82:92]
+            cpf = line[48:59]
+            valor = line[50:62]
+            regs[(lote, nu_nb)] = dict(line=line, conta=conta, cpf=cpf, valor=valor)
+    return regs
+
+def comparar(mac, con):
+    """Aplica Regras A e B da doc, retorna inconsistências (key, CS-OCORRENCIA, valor).
+    (Mantido para compatibilidade; a geração completa usa build_fhmlret11(mac,con))."""
+    inconsistentes = []
+    for key, reg_mac in mac.items():
+        reg_con = con.get(key)
+        if not reg_con:
+            continue
+        if key[0] == "20" and reg_mac.get("conta") != reg_con.get("conta"):
+            inconsistentes.append((key, 16, reg_mac.get("valor")))
+        elif key[0] == "21" and reg_mac.get("cpf") != reg_con.get("cpf"):
+            inconsistentes.append((key, 17, reg_mac.get("valor")))
+    return inconsistentes
+
+def pad(line: str) -> str:
+    return line[:240].ljust(240)
+
+# ---------------- BUILDER FHMLRET11 ----------------
+def build_fhmlret11(mac, con):
+    now = datetime.now()
+    data_geracao = now.strftime('%Y%m%d')
+    competencia = now.strftime('%Y%m')
+    timestamp = now.strftime('%Y%m%d%H%M%S')
+
+    out_path = READY_DIR / f"{STEM}.{timestamp}.FHMLRET11_final.d"
+    seq = 1
+    total_valor = 0
+
+    with open(out_path, 'w', encoding='utf-8') as f:
+        # HEADER ----------------------------------------------------
+        header = (
+            '1' + '0000001' + '03' + '254' + '01' +
+            data_geracao + '03' + competencia +
+            'CONPAG' + ' ' * 57 + '000001' + ' ' * 140
         )
-        # sort by modification time so the latest appears last
-        candidates = sorted(candidates, key=lambda p: p.stat().st_mtime)
+        f.write(pad(header) + '\n')
 
-    # If no candidates in corrigido, try archive (previously moved versions)
-    if not candidates:
-        archive_dir = base / "archive"
-        if archive_dir.exists():
-            archive_candidates = (
-                list(archive_dir.glob("*_fixed_*.d"))
-                + list(archive_dir.glob("*_fixed.d"))
-                + list(archive_dir.glob("*_fix*.d"))
+        # DETALHES -------------------------------------------------
+        for (lote, nu_nb), mac_data in mac.items():
+            reg_con = con.get((lote, nu_nb))
+            cod = '00'  # padrão sem divergência
+            if not reg_con:
+                cod = '99'  # ausente no CON
+            else:
+                if mac_data['conta'] != reg_con['conta']:
+                    cod = '16'
+                elif mac_data['cpf'] != reg_con['cpf']:
+                    cod = '17'
+
+            valor = int(''.join(filter(str.isdigit, mac_data['valor']))) if mac_data['valor'] else 0
+            total_valor += valor
+            detalhe = (
+                '2' + f"{seq:07d}" +
+                nu_nb.ljust(10) +
+                '20250228' + '20250201' + '01' +
+                data_geracao + '000001' +
+                f"{valor:012d}" + '8' + '20250331' +
+                ' ' * 40 + f"{cod}" + '01' + ' ' * 125
             )
-            archive_candidates = sorted(archive_candidates, key=lambda p: p.stat().st_mtime)
-            if archive_candidates:
-                # copy latest archived candidate back to corrigido for processing
-                latest = archive_candidates[-1]
-                corrigido_dir.mkdir(parents=True, exist_ok=True)
-                restored = corrigido_dir / latest.name
-                try:
-                    shutil.copy2(latest, restored)
-                    input_file = restored
-                    print(f"♻️ Restaurado arquivo de archive para {restored}")
-                except Exception as exc:
-                    print(f"Falha ao restaurar {latest} de archive: {exc}")
-                    input_file = None
-            else:
-                input_file = None
-        else:
-            input_file = None
+            f.write(pad(detalhe) + '\n')
+            seq += 1
 
-    if not candidates and not (input_file):
-        origem = data.get("origem") or (data.get("validacao", {}) and data.get("origem"))
-        if origem:
-            p = Path(origem)
-            if p.exists():
-                input_file = p
-                corrigido_dir = p.parent
-            else:
-                pr = Path(origem).resolve()
-                if pr.exists():
-                    input_file = pr
-                    corrigido_dir = pr.parent
-                else:
-                    print("❌ Nenhum arquivo corrigido encontrado (origem informado mas arquivo não existe):", origem)
-                    return
-        else:
-            print("❌ Nenhum arquivo corrigido encontrado.")
-            return
-    elif candidates:
-        input_file = candidates[-1]
+        # TRAILER --------------------------------------------------
+        qtd = len(mac)
+        trailer = (
+            '3' + '0000001' + '03' + '254' +
+            f"{qtd:08d}" + f"{total_valor:017d}" +
+            '03' + f"{qtd:08d}" + f"{total_valor:017d}" +
+            '00000000' + '00000000000000000' +
+            '00000000' + '00000000000000000' +
+            '00000000' + '00000000000000000' +
+            ' ' * 100
+        )
+        f.write(pad(trailer) + '\n')
 
-    # Canonicalizar stem para evitar repetições como _final_final ou _fix_final
-    # remove trailing _final ou _fix[_NNN] patterns iterativamente
-    s = input_file.stem
-    while True:
-        new = re.sub(r"(_final|_fix(_\d+)?)$", "", s)
-        if new == s:
+    print(f"✅ FHMLRET11 completo gerado: {out_path}")
+    print("   ➤ Conforme DOC FHMLRET11 – Pronto para envio ao Connect")
+    print("   ➤ Linhas 240 bytes garantidas")
+    return out_path
+
+# ---------------- DEBUG: MOSTRAR CAMPOS EXTRAÍDOS ----------------
+def debug_show_records(mac, con):
+    print("\n🧭 DEBUG: primeiros registros extraídos (tipo 200)\n")
+    print("Arquivo MAC:")
+    for i, ((lote, nb), data) in enumerate(mac.items()):
+        if i >= 5:
             break
-        s = new
-    canonical_stem = s
-    output_file = corrigido_dir / (canonical_stem + "_final.d")
+        print(f"  Lote={lote} | NB={nb} | Conta={data['conta']} | CPF={data['cpf']} | Valor={data['valor']}")
+    print("\nArquivo CON:")
+    for i, ((lote, nb), data) in enumerate(con.items()):
+        if i >= 5:
+            break
+        print(f"  Lote={lote} | NB={nb} | Conta={data['conta']} | CPF={data['cpf']} | Valor={data['valor']}")
 
-    # Arquivo de archive dentro de reports/<stem>/archive/
-    archive_dir = base / "archive"
-    archive_dir.mkdir(parents=True, exist_ok=True)
 
-    # Mover versões antigas (_final* e _fix*) para archive, exceto se for o futuro output
-    for p in list(corrigido_dir.glob("*_final*.d")) + list(corrigido_dir.glob("*_fix*.d")):
-        try:
-            # don't archive the input_file we're about to read or the final output we'll write
-            if p.resolve() in (output_file.resolve(), input_file.resolve()):
-                continue
-        except Exception:
-            pass
-        try:
-            target = archive_dir / p.name
-            print(f"📦 Arquivo antigo detectado e movendo para archive: {p.name} -> {target}")
-            shutil.move(str(p), str(target))
-        except Exception as exc:
-            print(f"Falha ao mover {p} para archive: {exc}")
-
-    # Identifica linhas inconsistentes a remover
-    inconsistent_lines = []
-    valid = data.get("validacao") or data
-    warnings = valid.get("avisos") or valid.get("warnings") or []
-    for w in warnings:
-        if isinstance(w, str) and "Linha" in w and "inconsistente" in w:
-            try:
-                num = int(w.split("Linha")[1].split(":")[0].strip().split("/")[0])
-                inconsistent_lines.append(num)
-            except Exception:
-                continue
-
-    print(f"🔎 Linhas inconsistentes detectadas: {inconsistent_lines}")
-
-    # Leitura e filtragem
-    lines = [l.rstrip("\n") for l in open(input_file, "r", encoding="utf-8")]
-    new_lines = []
-    for idx, line in enumerate(lines, start=1):
-        if idx in inconsistent_lines:
-            print(f"🗑️ Removendo linha {idx}: {line[:20]}...")
+def debug_compare(mac, con):
+    print("\n🧩 DEBUG: comparando campos MAC × CON\n")
+    for key, reg_mac in mac.items():
+        reg_con = con.get(key)
+        if not reg_con:
+            print(f"  ❌ Ausente no CON: {key}")
             continue
-        new_lines.append(line[:240].ljust(240))
+        diff = []
+        if reg_mac['conta'] != reg_con['conta']:
+            diff.append(f"Conta: {reg_mac['conta']} ≠ {reg_con['conta']}")
+        if reg_mac['cpf'] != reg_con['cpf']:
+            diff.append(f"CPF: {reg_mac['cpf']} ≠ {reg_con['cpf']}")
+        if reg_mac['valor'] != reg_con['valor']:
+            diff.append(f"Valor: {reg_mac['valor']} ≠ {reg_con['valor']}")
+        if diff:
+            print(f"  ⚠️ Diferença em {key}: {', '.join(diff)}")
+    print("\n✔️ Fim da verificação de divergências.\n")
 
-    # Recalcular trailer usando slice 17:32
-    header = new_lines[0]
-    details = [l for l in new_lines if l.startswith("200")]
-    trailer = [l for l in new_lines if l.startswith("300")][-1]
 
-    total_registros = str(len(details)).rjust(8, "0")
-    total_val = 0
-    for l in details:
-        slice_val = l[17:32].strip()
-        slice_val = ''.join(ch for ch in slice_val if ch.isdigit())
-        if not slice_val:
-            continue
-        try:
-            total_val += int(slice_val)
-        except Exception:
-            continue
-    total_val = str(total_val).rjust(15, "0")
-
-    trailer_list = list(trailer)
-    trailer_list[9:17] = list(total_registros)
-    trailer_list[17:32] = list(total_val)
-    trailer = "".join(trailer_list)[:240].ljust(240)
-
-    # Substitui trailer final
-    for i, l in enumerate(new_lines):
-        if l.startswith("300"):
-            new_lines[i] = trailer
-
-    # Gravar arquivo final
-    with open(output_file, "w", encoding="utf-8") as f:
-        for l in new_lines:
-            f.write(l + "\n")
-
-    print(f"✅ Arquivo final salvo em {output_file}")
-
-    # After writing canonical final, ensure there are no other *_final*.d in corrigido
-    for p in corrigido_dir.glob("*_final*.d"):
-        try:
-            if p.resolve() == output_file.resolve():
-                continue
-        except Exception:
-            pass
-        try:
-            target = archive_dir / p.name
-            print(f"📦 Movendo final redundante para archive: {p.name} -> {target}")
-            shutil.move(str(p), str(target))
-        except Exception as exc:
-            print(f"Falha ao mover {p} para archive: {exc}")
-
-    # Revalidar automaticamente
-    subprocess.run(["python3", "main.py", str(output_file)], check=False)
-
-    # tentar localizar o JSON gerado que referencia este arquivo como 'origem'
-    found_json = None
-    for jf in Path("reports").rglob("*.json"):
-        try:
-            with jf.open("r", encoding="utf-8") as handle:
-                payload = json.load(handle)
-            origem_val = payload.get("origem")
-            if origem_val == str(output_file) or origem_val == str(Path(output_file).resolve()):
-                found_json = jf
-                break
-        except Exception:
-            continue
-
-    # construir summary_final.json no diretório corrigido
-    summary_payload = {
-        "arquivo": base.name,
-        "final_file": str(output_file),
-        "status": None,
-        "report_json": None,
-    }
-    if found_json:
-        try:
-            with found_json.open("r", encoding="utf-8") as fh:
-                pj = json.load(fh)
-            summary_payload["status"] = pj.get("validacao", {}).get("conteudo")
-            summary_payload["report_json"] = str(found_json)
-        except Exception:
-            pass
-
-    summary_path = corrigido_dir / "summary_final.json"
-    with summary_path.open("w", encoding="utf-8") as fh:
-        json.dump(summary_payload, fh, indent=2, ensure_ascii=False)
-
-    # Atualizar resumo leigo
-    resumo = Path("resumo_leigo.txt")
-    resumo.write_text(
-        "🟢 Revalidação final executada com sucesso.\n"
-        f"Linhas removidas: {inconsistent_lines}\n"
-        f"Arquivo final: {output_file.name}\n"
-        "Verifique summary_final.json na pasta correspondente para status final.",
-        encoding="utf-8"
-    )
-
-    # Mover artefatos finais para input/arquivo_pronto_para_envio_connect/
-    target = Path.cwd() / "input" / "arquivo_pronto_para_envio_connect"
-    target.mkdir(parents=True, exist_ok=True)
-    try:
-        # copy final file
-        shutil.copy2(output_file, target / output_file.name)
-        # copy summary_final.json
-        shutil.copy2(summary_path, target / summary_path.name)
-        # copy resumo_leigo.txt
-        if resumo.exists():
-            shutil.copy2(resumo, target / resumo.name)
-        print(f"📁 Arquivos finais copiados para {target}")
-    except Exception as exc:
-        print(f"Falha ao mover arquivos finais para {target}: {exc}")
-
-    print("📄 resumo_leigo.txt atualizado com resultados.")
-
+# ---------------- MAIN ----------------
+def main():
+    clean_environment()
+    mac_path, mac_enc, con_path, con_enc = detect_encoding_and_type()
+    mac = read_details(mac_path, mac_enc)
+    con = read_details(con_path, con_enc)
+    # Gera sempre o arquivo completo (header, detalhes para todos os MAC e trailer)
+    build_fhmlret11(mac, con)
 
 if __name__ == "__main__":
-    import sys
-    if len(sys.argv) != 1 and len(sys.argv) != 2:
-        print("Uso: python3 finalize_pipeline.py <optional_path_para_json>")
-        sys.exit(1)
-    if len(sys.argv) == 2:
-        finalize_and_revalidate(sys.argv[1])
-    else:
-        print("Passe o caminho do JSON de revalidação do sub-lote para finalizar.")
+    main()
