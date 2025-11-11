@@ -3,4 +3,4 @@
 test-ret11:
 	python3 scripts/generate_test_files.py
 	python3 finalize_pipeline.py
-	pytest -q
+	python3 -m pytest -q
