@@ -48,18 +48,76 @@ def detect_encoding_and_type():
 
     Retorna: (mac_path, mac_encoding, con_path, con_encoding)
     """
-    files = [f for f in INPUT_DIR.iterdir() if f.is_file() and not f.name.startswith(".")]
+    files = [f for f in INPUT_DIR.iterdir() if f.is_file() and not f.name.startswith('.')]
     if len(files) != 2:
         raise RuntimeError("Coloque exatamente 2 arquivos (MAC e CON) na pasta input/")
 
-    def try_open(path, encoding):
-        try:
-            with open(path, "r", encoding=encoding, errors="ignore") as f:
-                lines = [line for line in f.readlines() if line.strip()]
-            count_2 = sum(1 for l in lines if l.strip().startswith("2"))
-            return count_2
-        except Exception:
-            return 0
+    # Preferência por nomes: se um arquivo tem 'MAC' no nome, considere-o MAC; se tem 'CON', considere CON.
+    names = {f.name.lower(): f for f in files}
+    mac_candidate = None
+    con_candidate = None
+    for name, path in names.items():
+        if 'mac' in name:
+            mac_candidate = path
+        if 'con' in name:
+            con_candidate = path
+
+    # Se ambos identificados por nome, use as escolhas.
+    if mac_candidate and con_candidate:
+        mac_file = mac_candidate
+        con_file = con_candidate
+    else:
+        # Fallback para heurística por contagem de linhas tipo '2' em diferentes encodings
+        def try_open_count(path, encoding):
+            try:
+                with open(path, 'r', encoding=encoding, errors='ignore') as f:
+                    lines = [line for line in f.readlines() if line.strip()]
+                return sum(1 for l in lines if l.strip().startswith('2'))
+            except Exception:
+                return 0
+
+        results = []
+        for file in files:
+            count_latin = try_open_count(file, 'latin-1')
+            count_cp500 = try_open_count(file, 'cp500')
+            if count_latin >= count_cp500:
+                encoding = 'latin-1'
+                count_final = count_latin
+            else:
+                encoding = 'cp500'
+                count_final = count_cp500
+            results.append((file, encoding, count_final))
+
+        # Ordena: o arquivo com mais linhas tipo "2" é o MAC
+        results.sort(key=lambda x: x[2], reverse=True)
+        mac_file, mac_enc, _ = results[0]
+        con_file, con_enc, _ = results[1]
+
+        # recompute encodings for the chosen pair (ensure both encoding values are set)
+        # if name-based selection wasn't possível, return computed encodings
+        print(f"[INFO] MAC file: {mac_file.name} (encoding={mac_enc})")
+        print(f"[INFO] CON file: {con_file.name} (encoding={con_enc})")
+        return mac_file, mac_enc, con_file, con_enc
+
+    # Se chegamos aqui, usamos a identificação por nome; detectar encodings separadamente
+    def detect_enc(path):
+        # test latin-1 vs cp500
+        for enc in ('latin-1', 'cp500'):
+            try:
+                with open(path, 'r', encoding=enc, errors='ignore') as f:
+                    lines = [l for l in f.readlines() if l.strip()]
+                # se houver pelo menos uma linha tipo '2' com esse encoding, aceite
+                if any(l.strip().startswith('2') for l in lines):
+                    return enc
+            except Exception:
+                continue
+        return 'latin-1'
+
+    mac_enc = detect_enc(mac_file)
+    con_enc = detect_enc(con_file)
+    print(f"[INFO] MAC file: {mac_file.name} (encoding={mac_enc})")
+    print(f"[INFO] CON file: {con_file.name} (encoding={con_enc})")
+    return mac_file, mac_enc, con_file, con_enc
 
     results = []
     for file in files:
