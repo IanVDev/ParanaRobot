@@ -1,0 +1,15 @@
+{
+  "run": "20251111_103511",
+  "inputs": {
+    "mac": "HMLMAC12.TESTE_MAC.txt",
+    "con": "HMLCON12.TESTE_CON.txt",
+    "records_mac": 10,
+    "records_con": 10
+  },
+  "details_written": 3,
+  "total_valor": 3702,
+  "breakdown": {
+    "16": 1,
+    "17": 2
+  }
+}
