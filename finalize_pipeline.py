@@ -32,7 +32,7 @@ BASE_DIR = Path(__file__).resolve().parent
 INPUT_DIR = BASE_DIR / "input"
 import json
 READY_DIR = BASE_DIR / "ready"
-UNUSED_DIRS = ["reports", "tmp", "output", "outputs", "ret", "logs", "tests"]
+UNUSED_DIRS = ["reports", "tmp", "output", "outputs", "ret", "logs"]
 STEM = "HMLMAC12.TESTE_FINAL"
 
 # ---------------- FUNÇÕES AUXILIARES ----------------
