@@ -30,6 +30,7 @@ from datetime import datetime
 # ---------------- CONFIGURAÇÕES ----------------
 BASE_DIR = Path(__file__).resolve().parent
 INPUT_DIR = BASE_DIR / "input"
+import json
 READY_DIR = BASE_DIR / "ready"
 UNUSED_DIRS = ["reports", "tmp", "output", "outputs", "ret", "logs", "tests"]
 STEM = "HMLMAC12.TESTE_FINAL"
@@ -181,15 +182,15 @@ def pad(line: str) -> str:
     return line[:240].ljust(240)
 
 # ---------------- BUILDER FHMLRET11 ----------------
-def build_fhmlret11(mac, con):
+def build_fhmlret11(mac, con, out_path: Path):
+    """Build FHMLRET11 into the given out_path (Path). Returns (out_path, details_count, total_valor)."""
     now = datetime.now()
     data_geracao = now.strftime("%Y%m%d")
     competencia = now.strftime("%Y%m")
-    timestamp = now.strftime("%Y%m%d%H%M%S")
 
-    out_path = READY_DIR / f"{STEM}.{timestamp}.FHMLRET11_final.d"
     seq = 1
     total_valor = 0
+    details_written = 0
 
     with open(out_path, "w", encoding="utf-8") as f:
         # HEADER
@@ -236,6 +237,7 @@ def build_fhmlret11(mac, con):
             )
             f.write(pad(detalhe) + "\n")
             seq += 1
+            details_written += 1
 
         # TRAILER
         qtd = seq - 2  # desconta header
@@ -253,7 +255,7 @@ def build_fhmlret11(mac, con):
     print(f"✅ FHMLRET11 (somente inconsistentes) gerado: {out_path}")
     print("   ➤ Somente ocorrências 16 e 17 incluídas")
     print("   ➤ Linhas 240 bytes garantidas")
-    return out_path
+    return out_path, details_written, total_valor
 
 # ---------------- DEBUG: MOSTRAR CAMPOS EXTRAÍDOS ----------------
 def debug_show_records(mac, con):
@@ -295,13 +297,77 @@ def main():
     mac_path, mac_enc, con_path, con_enc = detect_encoding_and_type()
     mac = read_details(mac_path, mac_enc)
     con = read_details(con_path, con_enc)
-    # Opcional: mostrar debug resumido
+
+    # prepare run directories
+    now = datetime.now()
+    run_ts = now.strftime("%Y%m%d_%H%M%S")
+    run_dir = BASE_DIR / "runs" / f"{run_ts}_TESTE_RET11"
+    inputs_dir = run_dir / "inputs"
+    outputs_dir = run_dir / "outputs"
+    inputs_dir.mkdir(parents=True, exist_ok=True)
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+
+    # copy original input files into run inputs
+    shutil.copy(mac_path, inputs_dir / mac_path.name)
+    shutil.copy(con_path, inputs_dir / con_path.name)
+
+    # debug print and comparison (console)
     debug_show_records(mac, con)
     debug_compare(mac, con)
 
-    # Gera arquivo contendo apenas inconsistências (a função build_fhmlret11
-    # faz a filtragem interna por 16/17 conforme nova regra)
-    build_fhmlret11(mac, con)
+    # compute inconsistencies using comparar() and filter only 16/17
+    inconsistencias = comparar(mac, con)
+    inconsistencias_16_17 = [ (k, c, v) for (k,c,v) in inconsistencias if c in ("16","17") ]
+
+    # build RET11 into run outputs
+    out_filename = f"{STEM}.{run_ts}.FHMLRET11_final.d"
+    out_path = outputs_dir / out_filename
+    written_path, details_count, total_val = build_fhmlret11(mac, con, out_path)
+
+    # copy final RET11 to ready/ for quick access
+    READY_DIR.mkdir(exist_ok=True)
+    shutil.copy(written_path, READY_DIR / written_path.name)
+
+    # write CSV report of inconsistencies (only 16/17)
+    csv_path = outputs_dir / "relatorio_inconsistencias.csv"
+    with open(csv_path, "w", encoding="utf-8") as f:
+        f.write("lote,nb,cs_ocorrencia,valor\n")
+        for (lote_nb, cs, valor) in inconsistencias_16_17:
+            lote, nb = lote_nb
+            val_digits = "".join(ch for ch in (valor or "") if ch.isdigit())
+            f.write(f"{lote},{nb},{cs},{val_digits}\n")
+
+    # write summary.json
+    summary = {
+        "run": run_ts,
+        "inputs": {"mac": mac_path.name, "con": con_path.name, "records_mac": len(mac), "records_con": len(con)},
+        "details_written": details_count,
+        "total_valor": total_val,
+        "breakdown": {
+            "16": sum(1 for _ in inconsistencias_16_17 if _[1]=="16"),
+            "17": sum(1 for _ in inconsistencias_16_17 if _[1]=="17"),
+        }
+    }
+    summary_path = run_dir / "summary.json"
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+
+    # write a simple README_run.txt and logs.txt
+    with open(run_dir / "README_run.txt", "w", encoding="utf-8") as f:
+        f.write(f"Run: {run_ts}\n")
+        f.write(f"MAC input: {mac_path.name}\n")
+        f.write(f"CON input: {con_path.name}\n")
+        f.write(f"RET11 produced: outputs/{written_path.name}\n")
+        f.write(f"Details written: {details_count}\n")
+
+    with open(outputs_dir / "logs.txt", "w", encoding="utf-8") as f:
+        f.write("DEBUG compare summary:\n")
+        for (lote_nb, cs, valor) in inconsistencias_16_17:
+            lote, nb = lote_nb
+            f.write(f"{lote},{nb},{cs},{valor}\n")
+
+    print(f"✅ Run artifacts written to: {run_dir}")
+    print(f"✅ RET11 copied to ready/{written_path.name}")
 
 if __name__ == "__main__":
     main()

@@ -42,12 +42,12 @@ def make_line(lote: str, nb: str, conta: str, cpf: str, valor: str) -> str:
     return "".join(line)
 
 def alter_cpf(cpf: str) -> str:
-    # muda o último dígito (simples)
-    if not cpf or not cpf[-1].isdigit():
+    # altera o primeiro dígito do CPF (evita sobreposição com campo valor nas posições)
+    if not cpf or not cpf[0].isdigit():
         return cpf
-    last = int(cpf[-1])
-    new_last = (last + 1) % 10
-    return cpf[:-1] + str(new_last)
+    first = int(cpf[0])
+    new_first = (first + 1) % 10
+    return str(new_first) + cpf[1:]
 
 def alter_conta(conta: str) -> str:
     # altera 1 dígito no meio da conta
