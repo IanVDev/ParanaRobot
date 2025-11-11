@@ -241,8 +241,10 @@ def build_fhmlret11(mac, con, out_path: Path):
 
         # TRAILER
         qtd = seq - 2  # desconta header
+        # trailer sequence must be the next sequence after the last detail
+        trailer_seq = f"{seq:07d}"
         trailer = (
-            "3" + "0000001" + "03" + "254" +
+            "3" + trailer_seq + "03" + "254" +
             f"{qtd:08d}" + f"{total_valor:017d}" +
             "03" + f"{qtd:08d}" + f"{total_valor:017d}" +
             "00000000" + "00000000000000000" +
