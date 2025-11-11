@@ -153,13 +153,17 @@ def build_fhmlret11(mac, con):
             if not reg_con:
                 continue  # ignora ausente no CON (não gera 99 mais)
 
+            # Determina código de ocorrência com precedência conforme documento:
+            # - se lote == '21' verifica CPF (17)
+            # - se lote == '20' verifica Conta (16)
             cod = None
-            if mac_data["conta"] != reg_con["conta"]:
-                cod = "16"
-            elif mac_data["cpf"] != reg_con["cpf"]:
+            if lote == '21' and mac_data.get("cpf") != reg_con.get("cpf"):
                 cod = "17"
+            elif lote == '20' and mac_data.get("conta") != reg_con.get("conta"):
+                cod = "16"
             else:
-                continue  # se não há divergência real, pula
+                # sem divergência relevante para a regra do lote
+                continue
 
             valor = int("".join(filter(str.isdigit, mac_data["valor"]))) if mac_data["valor"] else 0
             total_valor += valor
